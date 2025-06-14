@@ -1,0 +1,26 @@
+apiVersion: v1
+baseDomain: kubesoar.com 
+compute:
+- name: worker
+  replicas: 0 
+controlPlane:
+  name: master
+  replicas: 1 
+metadata:
+  name: okd
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineNetwork:
+  - cidr: 10.0.0.0/16 
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  none: {}
+bootstrapInPlace:
+  installationDisk: /dev/disk/by-id/wwn-0x500a0751435cebaf
+pullSecret: ''
+sshKey: |
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYmSlcqfHVHVawSNxK/GIhDBQOf8Zc4bjRYIkNulMTP josephsims1@gmail.com
