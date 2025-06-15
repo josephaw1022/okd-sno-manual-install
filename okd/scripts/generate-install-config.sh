@@ -46,7 +46,7 @@ bootstrapInPlace:
   installationDisk: /dev/disk/by-id/$DISK_ID
 pullSecret: '{"auths":{"fake":{"auth":"aWQ6cGFzcwo="}}}'
 sshKey: |
-  $(cat ~/$SSH_KEY_FILE)
+  $(cat $SSH_KEY_FILE)
 EOF
 
 echo "✅ install-config.yaml created!"
