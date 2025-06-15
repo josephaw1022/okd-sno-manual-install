@@ -83,4 +83,4 @@ iso: ## Embed the ignition config into the FCOS ISO.
 clean: ## Clean up generated files.
 	@echo "🧹 Cleaning up..."
 	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso
-	rm -rf sno install-config.yaml
+	rm -rf sno/* install-config.yaml fcos-live.iso
