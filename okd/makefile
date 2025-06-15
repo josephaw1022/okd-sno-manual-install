@@ -21,16 +21,16 @@ deps: ## Install dependencies (podman).
 	@echo "🔧 Installing dependencies (podman)..."
 	sudo dnf install -y podman
 
-.PHONY: download-oc
-download-oc: ## Download the OKD oc CLI.
+.PHONY: oc
+oc: ## Download the OKD oc CLI.
 	@echo "⬇️ Downloading oc CLI..."
 	curl -L $(OC_URL) -o oc.tar.gz
 	tar zxf oc.tar.gz
 	chmod +x oc
 	sudo mv ./oc /usr/local/bin/
 
-.PHONY: download-installer
-download-installer: ## Download the OKD openshift-install binary.
+.PHONY: installer
+installer: ## Download the OKD openshift-install binary.
 	@echo "⬇️ Downloading openshift-install..."
 	@tempdir=$$(mktemp -d) && \
 	cd $$tempdir && \
@@ -39,8 +39,8 @@ download-installer: ## Download the OKD openshift-install binary.
 	chmod +x openshift-install && \
 	sudo mv ./openshift-install /usr/local/bin/
 
-.PHONY: fetch-fcos
-fetch-fcos: ## Fetch the Fedora CoreOS (FCOS) ISO for the given architecture.
+.PHONY: fcos
+fcos: ## Fetch the Fedora CoreOS (FCOS) ISO for the given architecture.
 	@echo "🔍 Fetching FCOS ISO URL..."
 	export ISO_URL=`openshift-install coreos print-stream-json | grep location | grep $(ARCH) | grep iso | cut -d\" -f4` && \
 	curl -L $$ISO_URL -o fcos-live.iso
@@ -50,8 +50,8 @@ config: ## Generate install-config.yaml using a helper script.
 	./scripts/generate-install-config.sh $(CLUSTER_NAME) $(BASE_DOMAIN) $(DISK_ID) $(SSH_KEY)
 
 
-.PHONY: gen-ignition
-gen-ignition: ## Generate single-node ignition configuration.
+.PHONY: ignition
+ignition: ## Generate single-node ignition configuration.
 	@echo "📦 Generating ignition configs..."
 	mkdir -p sno
 	cp install-config.yaml sno
