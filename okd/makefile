@@ -84,3 +84,14 @@ clean: ## Clean up generated files.
 	@echo "🧹 Cleaning up..."
 	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso
 	rm -rf sno/* install-config.yaml fcos-live.iso
+
+
+
+.PHONY: build
+build: ## Build the OKD Single Node Installer e2e with all steps (FCOS, config, ignition, format-sno-files, iso). Does not install oc or openshift-install.
+	@echo "🔨 Building the OKD Single Node Installer..."
+	@$(MAKE) fcos
+	@$(MAKE) config
+	@$(MAKE) ignition
+	@$(MAKE) format-sno-files
+	@$(MAKE) iso
