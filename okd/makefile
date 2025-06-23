@@ -95,3 +95,48 @@ build: ## Build the OKD Single Node Installer e2e with all steps (FCOS, config, 
 	@$(MAKE) ignition
 	@$(MAKE) format-sno-files
 	@$(MAKE) iso
+
+
+.PHONY: use-kubeconfig
+use-kubeconfig: ## Replace ~/.kube/config with sno/auth/kubeconfig
+	@echo "🔁 Replacing ~/.kube/config with sno/auth/kubeconfig..."
+	@pushd sno/auth > /dev/null && \
+	if [ -f kubeconfig ]; then \
+	  mkdir -p $$HOME/.kube && \
+	  cp kubeconfig $$HOME/.kube/config && \
+	  chmod 600 $$HOME/.kube/config && \
+	  echo "✅ kubeconfig moved to ~/.kube/config"; \
+	else \
+	  echo "❌ kubeconfig not found in sno/auth"; \
+	fi && \
+	popd > /dev/null
+
+
+.PHONY: clean-known-hosts
+clean-known-hosts: ## Remove entries with node IP from known_hosts.
+	@echo "🧼 Cleaning known_hosts entries for node IP..."
+	@if [ -z "$(NODE_IP)" ]; then \
+	  echo "❌ NODE_IP not set. Run with: make clean-known-hosts NODE_IP=192.168.x.x"; \
+	  exit 1; \
+	fi
+	@KNOWN_HOSTS_FILE=$$HOME/.ssh/known_hosts; \
+	if [ -f $$KNOWN_HOSTS_FILE ]; then \
+	  grep -v "$(NODE_IP)" $$KNOWN_HOSTS_FILE > $$KNOWN_HOSTS_FILE.tmp && \
+	  mv $$KNOWN_HOSTS_FILE.tmp $$KNOWN_HOSTS_FILE && \
+	  echo "✅ Removed entries for IP: $(NODE_IP)"; \
+	else \
+	  echo "⚠️ No known_hosts file found at $$KNOWN_HOSTS_FILE"; \
+	fi
+
+
+.PHONY: watch-bootstrap
+watch-bootstrap: ## SSH into the node and tail release-image and bootkube logs.
+	@echo "👀 Watching bootstrap services on node..."
+	@if [ -z "$(NODE_IP)" ]; then \
+	  echo "❌ NODE_IP not set. Usage: make watch-bootstrap NODE_IP=192.168.1.6"; \
+	  exit 1; \
+	fi
+	@ssh core@$(NODE_IP) "journalctl -b -f -u release-image.service -u bootkube.service"
+
+
+
