@@ -1,6 +1,6 @@
 # Makefile for Single Node OKD Install
 
-OKD_VERSION ?= 4.19.0-okd-scos.3
+OKD_VERSION ?= 4.20.0-okd-scos.8
 ARCH ?= x86_64
 CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
@@ -40,10 +40,15 @@ installer: ## Download the OKD openshift-install binary.
 	sudo mv ./openshift-install /usr/local/bin/
 
 .PHONY: fcos
-fcos: ## Fetch the Fedora CoreOS (FCOS) ISO for the given architecture.
-	@echo "🔍 Fetching FCOS ISO URL..."
-	export ISO_URL=`openshift-install coreos print-stream-json | grep location | grep $(ARCH) | grep iso | cut -d\" -f4` && \
-	curl -L $$ISO_URL -o fcos-live.iso
+fcos:
+	@echo "🔍 Fetching CoreOS ISO URL for $(ARCH)..."
+	@ISO_URL=$$(openshift-install coreos print-stream-json \
+		| jq -r '.architectures.x86_64.artifacts.metal.formats.iso.disk.location'); \
+	[ -n "$$ISO_URL" ] || { echo "❌ No ISO URL found"; exit 1; }; \
+	echo "➡️  $$ISO_URL"; \
+	curl -L "$$ISO_URL" -o fcos-live.iso
+
+
 
 .PHONY: config
 config: ## Generate install-config.yaml using a helper script.
@@ -140,3 +145,14 @@ watch-bootstrap: ## SSH into the node and tail release-image and bootkube logs.
 
 
 
+
+
+.PHONY: extract-manifests
+extract-manifests: ## Extract bootstrap manifests from the single-node ignition config.
+	./scripts/extract-bootstrap-manifests.sh
+
+.PHONY: render-manifests
+render-manifests: ## Render manifests using openshift-install.
+	mkdir -p _rendered
+	cp install-config.yaml _rendered/
+	openshift-install create manifests --dir _rendered
