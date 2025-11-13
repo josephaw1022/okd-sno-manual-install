@@ -6,6 +6,7 @@ CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
 DISK_ID ?= wwn-0x500a0751435cebaf
 SSH_KEY ?= ~/.ssh/id_ed25519.pub
+NODE_IP ?= 192.168.1.9
 
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
