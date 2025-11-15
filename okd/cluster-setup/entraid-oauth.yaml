@@ -1,0 +1,26 @@
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+    - name: azure
+      mappingMethod: claim
+      type: OpenID
+      openID:
+        clientID: "<AZURE_APP_CLIENT_ID>"
+        clientSecret:
+          name: "<OAUTH_CLIENT_SECRET_NAME>" # the secret must be created in the openshift-config namespace
+        issuer: "https://login.microsoftonline.com/<AZURE_TENANT_ID>"
+        claims:
+          email:
+            - email
+          name:
+            - name
+          preferredUsername:
+            - email
+        extraAuthorizeParameters:
+          include_granted_scopes: "true"
+        extraScopes:
+          - profile
+          - email
