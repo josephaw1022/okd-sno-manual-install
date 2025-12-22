@@ -89,7 +89,7 @@ iso: ## Embed the ignition config into the FCOS ISO.
 clean: ## Clean up generated files.
 	@echo "🧹 Cleaning up..."
 	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso
-	rm -rf sno/* install-config.yaml fcos-live.iso
+	rm -rf sno/* install-config.yaml fcos-live.iso _rendered
 
 
 
@@ -153,7 +153,38 @@ extract-manifests: ## Extract bootstrap manifests from the single-node ignition 
 	./scripts/extract-bootstrap-manifests.sh
 
 .PHONY: render-manifests
-render-manifests: ## Render manifests using openshift-install.
+render-manifests: ## Render manifests using openshift-install (for inspection/customization).
 	mkdir -p _rendered
 	cp install-config.yaml _rendered/
 	openshift-install create manifests --dir _rendered
+	@echo "✅ Manifests rendered to _rendered/"
+	@echo "📝 Modify files in _rendered/manifests/ and _rendered/openshift/ as needed"
+	@echo "👉 Then run: make ignition-from-manifests"
+
+
+.PHONY: ignition-from-manifests
+ignition-from-manifests: ## Generate ignition configs from customized manifests in _rendered/.
+	@echo "📦 Generating ignition from customized manifests..."
+	@if [ ! -d "_rendered/manifests" ]; then \
+	  echo "❌ No manifests found. Run 'make render-manifests' first and customize."; \
+	  exit 1; \
+	fi
+	openshift-install create single-node-ignition-config --dir=_rendered
+	@echo "✅ Ignition configs generated in _rendered/"
+	@echo "📁 Copying to sno/ for ISO embedding..."
+	mkdir -p sno/auth
+	cp _rendered/bootstrap-in-place-for-live-iso.ign sno/
+	cp _rendered/metadata.json sno/
+	cp -r _rendered/auth/* sno/auth/
+	@echo "✅ Files ready. Run 'make iso' to embed into the FCOS ISO."
+
+
+.PHONY: build-custom
+build-custom: ## Build with custom manifests: fcos → config → render-manifests → (pause to edit) → ignition-from-manifests → iso
+	@echo "🔨 Building OKD Single Node Installer with custom manifest support..."
+	@$(MAKE) fcos
+	@$(MAKE) config
+	@$(MAKE) render-manifests
+	@echo ""
+	@echo "⏸️  PAUSED: Edit manifests in _rendered/manifests/ and _rendered/openshift/"
+	@echo "   Then run: make ignition-from-manifests && make format-sno-files && make iso"
