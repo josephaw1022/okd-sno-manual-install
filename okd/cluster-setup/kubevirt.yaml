@@ -1,0 +1,55 @@
+
+# Instructions to set up KubeVirt on OKD
+
+# 1. Create the namespace for KubeVirt
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubevirt-hyperconverged
+
+---
+
+# 2. Install KubeVirt Hyperconverged Operator via Subscription
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: community-kubevirt-hyperconverged
+  namespace: kubevirt-hyperconverged
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: community-kubevirt-hyperconverged
+  source: community-operators
+  sourceNamespace: openshift-marketplace
+  startingCSV: kubevirt-hyperconverged-operator.v1.16.0
+
+---
+
+# 3. Apply the Hyperconverged Custom Resource (wait for operator to be ready first)
+
+kind: HyperConverged
+apiVersion: hco.kubevirt.io/v1beta1
+metadata:
+  annotations:
+    deployOVS: 'false'
+  name: kubevirt-hyperconverged
+  namespace: kubevirt-hyperconverged
+spec: {}
+
+
+---
+
+# 4. Finally, apply this HostPathProvisioner configuration (this currently isnt working for me, needs further investigation)
+kind: HostPathProvisioner
+apiVersion: hostpathprovisioner.kubevirt.io/v1beta1
+metadata:
+  name: hostpath-provisioner
+spec:
+  imagePullPolicy: IfNotPresent
+  storagePools:
+    - name: local
+      path: /var/hpvolumes
+  workload:
+    nodeSelector:
+      kubernetes.io/os: linux
