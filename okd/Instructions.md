@@ -1,6 +1,6 @@
-# OKD 3-Node Master Cluster Setup – Libvirt Installation Guide
+# OKD 3-Node Master Cluster Setup – Agent-Based Installer with Libvirt
 
-This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 server using libvirt/KVM.
+This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 server using libvirt/KVM and the **agent-based installer**. This approach uses a single ISO for all nodes - no separate bootstrap VM required.
 
 **Target Environment:**
 - CentOS Stream 10 server with 125GB RAM, 13 CPUs
@@ -8,7 +8,7 @@ This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 s
 - Network: 192.168.0.0/21 (private router network)
 
 **Reference:**
-[https://docs.okd.io/latest/installing/installing_bare_metal/installing-bare-metal.html](https://docs.okd.io/latest/installing/installing_bare_metal/installing-bare-metal.html)
+[https://docs.okd.io/latest/installing/installing_with_agent_based_installer/preparing-to-install-with-agent-based-installer.html](https://docs.okd.io/latest/installing/installing_with_agent_based_installer/preparing-to-install-with-agent-based-installer.html)
 
 
 
@@ -33,10 +33,10 @@ sudo systemctl enable --now libvirtd
 
 ## DNS Setup
 
-You need a DNS server on your private network with the following records. Example using Pi-hole/dnsmasq (`/etc/dnsmasq.d/okd.conf`):
+You need a DNS server on your private network. Example using Pi-hole/dnsmasq (`/etc/dnsmasq.d/okd.conf`):
 
 ```
-# API server - points to one of the masters (or load balancer if you have one)
+# API server - points to master-0 (rendezvous host)
 address=/api.okd.kubesoar.com/192.168.1.10
 
 # Internal API
@@ -44,9 +44,6 @@ address=/api-int.okd.kubesoar.com/192.168.1.10
 
 # Apps wildcard - for ingress
 address=/.apps.okd.kubesoar.com/192.168.1.10
-
-# Bootstrap node (temporary)
-address=/bootstrap.okd.kubesoar.com/192.168.1.9
 
 # Master nodes
 address=/master-0.okd.kubesoar.com/192.168.1.10
@@ -59,7 +56,6 @@ srv-host=_etcd-server-ssl._tcp.okd.kubesoar.com,master-1.okd.kubesoar.com,2380,0
 srv-host=_etcd-server-ssl._tcp.okd.kubesoar.com,master-2.okd.kubesoar.com,2380,0,10
 
 # PTR records
-ptr-record=9.1.168.192.in-addr.arpa,bootstrap.okd.kubesoar.com
 ptr-record=10.1.168.192.in-addr.arpa,master-0.okd.kubesoar.com
 ptr-record=11.1.168.192.in-addr.arpa,master-1.okd.kubesoar.com
 ptr-record=12.1.168.192.in-addr.arpa,master-2.okd.kubesoar.com
@@ -82,7 +78,9 @@ MACHINE_NETWORK_CIDR ?= 192.168.0.0/21
 MASTER0_IP ?= 192.168.1.10
 MASTER1_IP ?= 192.168.1.11
 MASTER2_IP ?= 192.168.1.12
-API_VIP ?= 192.168.1.9
+
+# Gateway/DNS
+GATEWAY_IP ?= 192.168.1.1
 
 # Libvirt VM settings
 VM_CPUS ?= 4
@@ -104,17 +102,18 @@ make oc
 make installer
 ```
 
-### Step 2: Build the ISOs
+### Step 2: Build the Agent ISO
 
 ```bash
 make build
 ```
 
 This will:
-1. Download FCOS ISO
-2. Generate install-config.yaml for 3-node cluster
-3. Create ignition configs
-4. Embed ignition into ISOs (fcos-master.iso, fcos-bootstrap.iso)
+1. Generate `install-config.yaml` for 3-node cluster
+2. Generate `agent-config.yaml` with static IPs and MAC addresses
+3. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
+
+**Important:** The `agent-config.yaml` maps MAC addresses to IPs. Make sure the MAC addresses in the config match what you'll use in the VMs.
 
 ### Step 3: Configure Ansible Inventory
 
@@ -132,7 +131,7 @@ all:
           vm_disk_size_gb: 120
 ```
 
-### Step 4: Copy ISOs to Server
+### Step 4: Copy ISO to Server
 
 ```bash
 cd ansible
@@ -145,41 +144,19 @@ ansible-playbook -i inventory.yml copy-iso.yml
 ansible-playbook -i inventory.yml create-vms.yml
 ```
 
-This creates:
-- 1 bootstrap node (temporary)
-- 3 master nodes
+This creates 3 master VMs, all booting from the same agent ISO. The first node (master-0) is the "rendezvous" host that coordinates the installation.
 
-### Step 6: Monitor Bootstrap
+### Step 6: Monitor Installation
 
 ```bash
-make wait-bootstrap
-# Or watch logs:
+# Wait for install to complete
+make wait-install
+
+# Or watch logs on the rendezvous node
 make watch-bootstrap
 ```
 
-### Step 7: Remove Bootstrap (after bootstrap completes)
-
-Once bootstrap is complete, destroy the bootstrap VM:
-
-```bash
-# On the server or via ansible
-virsh destroy okd-bootstrap
-virsh undefine okd-bootstrap --remove-all-storage
-```
-
-### Step 8: Complete Installation
-
-```bash
-make wait-install
-```
-
-### Step 9: Approve CSRs (if needed)
-
-```bash
-make approve-csrs
-```
-
-### Step 10: Access the Cluster
+### Step 7: Access the Cluster
 
 ```bash
 make use-kubeconfig
@@ -190,18 +167,6 @@ oc get co
 ---
 
 ## Post-Installation
-
-### LDAP / FreeIPA CA Extraction
-
-*(Skip if using Entra ID)*
-
-```bash
-sudo podman cp idm-server:/etc/ipa/ca.crt /tmp/freeipa-ca.crt
-```
-
-Download locally → Upload in OKD Console under LDAP configuration.
-
----
 
 ### Entra ID (Azure AD)
 
@@ -285,8 +250,14 @@ make clean
 sudo hostnamectl set-hostname master-0.okd.kubesoar.com
 ```
 
-### View Bootstrap Logs
+### View Agent Logs on Rendezvous Node
 
 ```bash
-ssh core@192.168.1.9 "journalctl -b -f -u release-image.service -u bootkube.service"
+ssh core@192.168.1.10 "journalctl -b -f -u agent.service"
+```
+
+### Approve CSRs (if nodes aren't joining)
+
+```bash
+make approve-csrs
 ```

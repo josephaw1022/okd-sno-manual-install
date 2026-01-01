@@ -1,8 +1,9 @@
 ---
-# Ansible playbook to create OKD VMs using libvirt
+# Ansible playbook to create OKD VMs using libvirt (Agent-Based Installer)
 # Usage: ansible-playbook -i inventory.yml create-vms.yml
 #
-# This creates 3 master nodes for the OKD cluster
+# This creates 3 master nodes for the OKD cluster using a single agent ISO.
+# No bootstrap VM needed - the agent installer handles bootstrapping internally.
 
 - name: Create OKD VMs on libvirt host
   hosts: libvirt_hosts
@@ -10,32 +11,20 @@
   vars:
     cluster_name: okd
     base_domain: kubesoar.com
+    agent_iso: "agent.x86_64.iso"
     
     # VM definitions for 3 master nodes
+    # MAC addresses must match those in agent-config.yaml
     okd_vms:
       - name: "{{ cluster_name }}-master-0"
         mac: "52:54:00:00:00:10"
         ip: "192.168.1.10"
-        iso: "fcos-master.iso"
-        role: master
       - name: "{{ cluster_name }}-master-1"
         mac: "52:54:00:00:00:11"
         ip: "192.168.1.11"
-        iso: "fcos-master.iso"
-        role: master
       - name: "{{ cluster_name }}-master-2"
         mac: "52:54:00:00:00:12"
         ip: "192.168.1.12"
-        iso: "fcos-master.iso"
-        role: master
-
-    # Bootstrap node (temporary, can be removed after cluster is up)
-    bootstrap_vm:
-      name: "{{ cluster_name }}-bootstrap"
-      mac: "52:54:00:00:00:09"
-      ip: "192.168.1.9"
-      iso: "fcos-bootstrap.iso"
-      role: bootstrap
 
   tasks:
     - name: Ensure libvirt is running
@@ -50,57 +39,6 @@
         state: directory
         mode: '0755'
 
-    # Create Bootstrap VM
-    - name: Create bootstrap VM disk
-      ansible.builtin.command:
-        cmd: >
-          qemu-img create -f qcow2
-          {{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2
-          {{ vm_disk_size_gb }}G
-        creates: "{{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2"
-
-    - name: Define bootstrap VM
-      ansible.builtin.command:
-        cmd: >
-          virt-install
-          --name {{ bootstrap_vm.name }}
-          --ram {{ vm_memory_mb }}
-          --vcpus {{ vm_cpus }}
-          --disk path={{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2,format=qcow2,bus=virtio
-          --cdrom {{ iso_dest_path }}/{{ bootstrap_vm.iso }}
-          --network network={{ vm_network }},mac={{ bootstrap_vm.mac }}
-          --os-variant fedora-coreos-stable
-          --graphics vnc,listen=0.0.0.0
-          --noautoconsole
-          --boot hd,cdrom
-          --print-xml
-      register: bootstrap_xml
-      changed_when: false
-
-    - name: Check if bootstrap VM exists
-      ansible.builtin.command:
-        cmd: virsh dominfo {{ bootstrap_vm.name }}
-      register: bootstrap_exists
-      failed_when: false
-      changed_when: false
-
-    - name: Create bootstrap VM from XML
-      ansible.builtin.shell:
-        cmd: |
-          virt-install \
-            --name {{ bootstrap_vm.name }} \
-            --ram {{ vm_memory_mb }} \
-            --vcpus {{ vm_cpus }} \
-            --disk path={{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2,format=qcow2,bus=virtio \
-            --cdrom {{ iso_dest_path }}/{{ bootstrap_vm.iso }} \
-            --network network={{ vm_network }},mac={{ bootstrap_vm.mac }} \
-            --os-variant fedora-coreos-stable \
-            --graphics vnc,listen=0.0.0.0 \
-            --noautoconsole \
-            --boot hd,cdrom
-      when: bootstrap_exists.rc != 0
-
-    # Create Master VMs
     - name: Create master VM disks
       ansible.builtin.command:
         cmd: >
@@ -126,7 +64,7 @@
             --ram {{ vm_memory_mb }} \
             --vcpus {{ vm_cpus }} \
             --disk path={{ iso_dest_path }}/{{ item.item.name }}.qcow2,format=qcow2,bus=virtio \
-            --cdrom {{ iso_dest_path }}/{{ item.item.iso }} \
+            --cdrom {{ iso_dest_path }}/{{ agent_iso }} \
             --network network={{ vm_network }},mac={{ item.item.mac }} \
             --os-variant fedora-coreos-stable \
             --graphics vnc,listen=0.0.0.0 \
@@ -139,13 +77,14 @@
       ansible.builtin.debug:
         msg:
           - "VMs created successfully!"
-          - "Bootstrap: {{ bootstrap_vm.name }} - {{ bootstrap_vm.ip }}"
-          - "Master 0: {{ okd_vms[0].name }} - {{ okd_vms[0].ip }}"
+          - "Master 0 (rendezvous): {{ okd_vms[0].name }} - {{ okd_vms[0].ip }}"
           - "Master 1: {{ okd_vms[1].name }} - {{ okd_vms[1].ip }}"
           - "Master 2: {{ okd_vms[2].name }} - {{ okd_vms[2].ip }}"
           - ""
+          - "All 3 nodes boot from the same agent ISO."
+          - "Master-0 is the rendezvous host and will coordinate the install."
+          - ""
           - "Next steps:"
           - "1. Ensure DNS records are configured for all nodes"
-          - "2. Wait for bootstrap to complete: make wait-bootstrap"
-          - "3. Remove bootstrap VM after completion"
-          - "4. Wait for install to complete: make wait-install"
+          - "2. Monitor install progress: make wait-install"
+          - "3. Watch logs: make watch-bootstrap"

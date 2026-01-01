@@ -9,7 +9,6 @@
     cluster_name: okd
     
     vms_to_destroy:
-      - "{{ cluster_name }}-bootstrap"
       - "{{ cluster_name }}-master-0"
       - "{{ cluster_name }}-master-1"
       - "{{ cluster_name }}-master-2"

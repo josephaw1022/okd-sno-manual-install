@@ -1,4 +1,4 @@
-# Makefile for OKD 3-Node Master Cluster with Libvirt
+# Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
 OKD_VERSION ?= 4.20.0-okd-scos.8
 ARCH ?= x86_64
@@ -11,7 +11,9 @@ MACHINE_NETWORK_CIDR ?= 192.168.0.0/21
 MASTER0_IP ?= 192.168.1.10
 MASTER1_IP ?= 192.168.1.11
 MASTER2_IP ?= 192.168.1.12
-API_VIP ?= 192.168.1.9
+
+# Gateway/DNS server
+GATEWAY_IP ?= 192.168.1.1
 
 # Libvirt VM settings
 VM_CPUS ?= 4
@@ -55,7 +57,7 @@ installer: ## Download the OKD openshift-install binary.
 	sudo mv ./openshift-install /usr/local/bin/
 
 .PHONY: fcos
-fcos:
+fcos: ## Download the FCOS ISO (for reference, agent-iso creates its own).
 	@echo "🔍 Fetching CoreOS ISO URL for $(ARCH)..."
 	@ISO_URL=$$(openshift-install coreos print-stream-json \
 		| jq -r '.architectures.x86_64.artifacts.metal.formats.iso.disk.location'); \
@@ -66,68 +68,44 @@ fcos:
 
 
 .PHONY: config
-config: ## Generate install-config.yaml using a helper script.
-	./scripts/generate-install-config.sh $(CLUSTER_NAME) $(BASE_DOMAIN) $(SSH_KEY) $(MACHINE_NETWORK_CIDR)
+config: ## Generate install-config.yaml and agent-config.yaml.
+	./scripts/generate-install-config.sh $(CLUSTER_NAME) $(BASE_DOMAIN) $(SSH_KEY) $(MACHINE_NETWORK_CIDR) $(MASTER0_IP) $(MASTER1_IP) $(MASTER2_IP)
 
 
-.PHONY: ignition
-ignition: ## Generate ignition configurations for 3-node cluster.
-	@echo "📦 Generating ignition configs for 3-node cluster..."
+.PHONY: agent-iso
+agent-iso: ## Generate the agent-based installer ISO (single ISO for all nodes).
+	@echo "📦 Generating agent-based installer ISO..."
 	mkdir -p cluster
 	cp install-config.yaml cluster/
-	openshift-install --dir=cluster create manifests
-	openshift-install --dir=cluster create ignition-configs
-	@echo "✅ Ignition configs created in cluster/"
+	cp agent-config.yaml cluster/
+	openshift-install --dir=cluster agent create image
+	@echo "✅ Agent ISO created: cluster/agent.x86_64.iso"
 
 
-.PHONY: format-sno-files
-format-sno-files: ## Format all .ign and .json files in cluster/ using jq.
+.PHONY: format-files
+format-files: ## Format all .ign and .json files in cluster/ using jq.
 	@echo "✨ Formatting .ign and .json files in cluster/..."
 	@find cluster -type f \( -name '*.ign' -o -name '*.json' \) -exec sh -c 'jq . {} > tmp && mv tmp {}' \;
 	@echo "✅ Files formatted."
 
 
 
-.PHONY: iso
-iso: ## Create bootable ISOs for bootstrap and master nodes.
-	@echo "💾 Creating master ISO with embedded ignition..."
-	@cp fcos-live.iso fcos-master.iso
-	@podman run --privileged --pull always --rm \
-		-v /dev:/dev \
-		-v /run/udev:/run/udev \
-		-v $(PWD):/data \
-		-w /data \
-		quay.io/coreos/coreos-installer:release \
-		iso ignition embed -fi cluster/master.ign fcos-master.iso
-	@echo "💾 Creating bootstrap ISO with embedded ignition..."
-	@cp fcos-live.iso fcos-bootstrap.iso
-	@podman run --privileged --pull always --rm \
-		-v /dev:/dev \
-		-v /run/udev:/run/udev \
-		-v $(PWD):/data \
-		-w /data \
-		quay.io/coreos/coreos-installer:release \
-		iso ignition embed -fi cluster/bootstrap.ign fcos-bootstrap.iso
-	@echo "✅ ISOs created: fcos-master.iso, fcos-bootstrap.iso"
-
-
-
 .PHONY: clean
 clean: ## Clean up generated files.
 	@echo "🧹 Cleaning up..."
-	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso fcos-master.iso fcos-bootstrap.iso
-	rm -rf cluster/* install-config.yaml _rendered
+	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso
+	rm -rf cluster/* install-config.yaml agent-config.yaml _rendered
 
 
 
 .PHONY: build
-build: ## Build the OKD 3-node cluster installer (FCOS, config, ignition, format, iso).
-	@echo "🔨 Building the OKD 3-Node Cluster Installer..."
-	@$(MAKE) fcos
+build: ## Build the agent-based installer ISO for 3-node cluster.
+	@echo "🔨 Building the OKD 3-Node Agent Installer ISO..."
 	@$(MAKE) config
-	@$(MAKE) ignition
-	@$(MAKE) format-sno-files
-	@$(MAKE) iso
+	@$(MAKE) agent-iso
+	@echo ""
+	@echo "✅ ISO ready: cluster/agent.x86_64.iso"
+	@echo "📋 Copy this ISO to your libvirt server and boot all 3 VMs from it"
 
 
 .PHONY: use-kubeconfig
@@ -159,21 +137,15 @@ clean-known-hosts: ## Remove entries with master IPs from known_hosts.
 
 
 .PHONY: watch-bootstrap
-watch-bootstrap: ## SSH into bootstrap node and tail logs.
-	@echo "👀 Watching bootstrap services on bootstrap node..."
-	@ssh core@$(MASTER0_IP) "journalctl -b -f -u release-image.service -u bootkube.service"
-
-
-.PHONY: wait-bootstrap
-wait-bootstrap: ## Wait for bootstrap to complete.
-	@echo "⏳ Waiting for bootstrap to complete..."
-	openshift-install --dir=cluster wait-for bootstrap-complete --log-level=info
+watch-bootstrap: ## SSH into rendezvous node (master-0) and tail logs.
+	@echo "👀 Watching bootstrap services on rendezvous node (master-0)..."
+	@ssh core@$(MASTER0_IP) "journalctl -b -f -u agent.service"
 
 
 .PHONY: wait-install
 wait-install: ## Wait for installation to complete.
 	@echo "⏳ Waiting for installation to complete..."
-	openshift-install --dir=cluster wait-for install-complete --log-level=info
+	openshift-install --dir=cluster agent wait-for install-complete --log-level=info
 
 
 .PHONY: approve-csrs
@@ -186,44 +158,14 @@ approve-csrs: ## Approve pending CSRs for nodes.
 
 
 .PHONY: extract-manifests
-extract-manifests: ## Extract bootstrap manifests from the single-node ignition config.
+extract-manifests: ## Extract manifests from the agent config (for inspection).
 	./scripts/extract-bootstrap-manifests.sh
 
 .PHONY: render-manifests
 render-manifests: ## Render manifests using openshift-install (for inspection/customization).
 	mkdir -p _rendered
 	cp install-config.yaml _rendered/
-	openshift-install create manifests --dir _rendered
+	cp agent-config.yaml _rendered/
+	openshift-install --dir=_rendered agent create cluster-manifests
 	@echo "✅ Manifests rendered to _rendered/"
-	@echo "📝 Modify files in _rendered/manifests/ and _rendered/openshift/ as needed"
-	@echo "👉 Then run: make ignition-from-manifests"
-
-
-.PHONY: ignition-from-manifests
-ignition-from-manifests: ## Generate ignition configs from customized manifests in _rendered/.
-	@echo "📦 Generating ignition from customized manifests..."
-	@if [ ! -d "_rendered/manifests" ]; then \
-	  echo "❌ No manifests found. Run 'make render-manifests' first and customize."; \
-	  exit 1; \
-	fi
-	openshift-install create ignition-configs --dir=_rendered
-	@echo "✅ Ignition configs generated in _rendered/"
-	@echo "📁 Copying to cluster/ for ISO embedding..."
-	mkdir -p cluster/auth
-	cp _rendered/master.ign cluster/
-	cp _rendered/bootstrap.ign cluster/
-	cp _rendered/worker.ign cluster/
-	cp _rendered/metadata.json cluster/
-	cp -r _rendered/auth/* cluster/auth/
-	@echo "✅ Files ready. Run 'make iso' to create the ISOs."
-
-
-.PHONY: build-custom
-build-custom: ## Build with custom manifests: fcos → config → render-manifests → (pause to edit) → ignition-from-manifests → iso
-	@echo "🔨 Building OKD 3-Node Cluster with custom manifest support..."
-	@$(MAKE) fcos
-	@$(MAKE) config
-	@$(MAKE) render-manifests
-	@echo ""
-	@echo "⏸️  PAUSED: Edit manifests in _rendered/manifests/ and _rendered/openshift/"
-	@echo "   Then run: make ignition-from-manifests && make format-sno-files && make iso"
+	@echo "📝 Modify files in _rendered/cluster-manifests/ as needed"

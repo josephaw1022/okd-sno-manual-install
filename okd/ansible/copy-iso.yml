@@ -1,14 +1,13 @@
 ---
-# Ansible playbook to copy OKD ISOs to the libvirt server
+# Ansible playbook to copy OKD agent ISO to the libvirt server
 # Usage: ansible-playbook -i inventory.yml copy-iso.yml
 
-- name: Copy OKD ISOs to libvirt server
+- name: Copy OKD agent ISO to libvirt server
   hosts: libvirt_hosts
   gather_facts: true
   vars:
-    local_iso_dir: "{{ playbook_dir }}/../"
-    bootstrap_iso: "fcos-bootstrap.iso"
-    master_iso: "fcos-master.iso"
+    local_iso_dir: "{{ playbook_dir }}/../cluster"
+    agent_iso: "agent.x86_64.iso"
 
   tasks:
     - name: Ensure destination directory exists
@@ -17,23 +16,15 @@
         state: directory
         mode: '0755'
 
-    - name: Copy bootstrap ISO to server
+    - name: Copy agent ISO to server
       ansible.builtin.copy:
-        src: "{{ local_iso_dir }}/{{ bootstrap_iso }}"
-        dest: "{{ iso_dest_path }}/{{ bootstrap_iso }}"
+        src: "{{ local_iso_dir }}/{{ agent_iso }}"
+        dest: "{{ iso_dest_path }}/{{ agent_iso }}"
         mode: '0644'
-      register: bootstrap_copy
-
-    - name: Copy master ISO to server
-      ansible.builtin.copy:
-        src: "{{ local_iso_dir }}/{{ master_iso }}"
-        dest: "{{ iso_dest_path }}/{{ master_iso }}"
-        mode: '0644'
-      register: master_copy
+      register: iso_copy
 
     - name: Display copy results
       ansible.builtin.debug:
         msg:
-          - "Bootstrap ISO: {{ 'Copied' if bootstrap_copy.changed else 'Already present' }}"
-          - "Master ISO: {{ 'Copied' if master_copy.changed else 'Already present' }}"
-          - "ISOs are now at: {{ iso_dest_path }}"
+          - "Agent ISO: {{ 'Copied' if iso_copy.changed else 'Already present' }}"
+          - "ISO location: {{ iso_dest_path }}/{{ agent_iso }}"
