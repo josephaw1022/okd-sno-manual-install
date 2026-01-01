@@ -12,7 +12,7 @@
     cluster_name: okd
     base_domain: kubesoar.com
     agent_iso: "agent.x86_64.iso"
-    
+
     # VM definitions for 3 master nodes
     # MAC addresses must match those in agent-config.yaml
     okd_vms:

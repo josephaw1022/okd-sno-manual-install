@@ -9,7 +9,7 @@ all:
           ansible_host: 192.168.1.100
           # VM configuration
           vm_cpus: 4
-          vm_memory_mb: 41984  # ~41GB per node (125GB / 3 nodes)
+          vm_memory_mb: 20480  # 20GB per node
           vm_disk_size_gb: 120
           iso_dest_path: /var/lib/libvirt/images
           vm_network: default

@@ -39,7 +39,7 @@ metadata:
 networking:
   clusterNetwork:
   - cidr: 10.128.0.0/14
-    hostPrefix: 23
+    hostPrefix: 20
   machineNetwork:
   - cidr: $MACHINE_NETWORK_CIDR
   networkType: OVNKubernetes
