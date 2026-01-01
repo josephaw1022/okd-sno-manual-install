@@ -1,0 +1,151 @@
+---
+# Ansible playbook to create OKD VMs using libvirt
+# Usage: ansible-playbook -i inventory.yml create-vms.yml
+#
+# This creates 3 master nodes for the OKD cluster
+
+- name: Create OKD VMs on libvirt host
+  hosts: libvirt_hosts
+  gather_facts: true
+  vars:
+    cluster_name: okd
+    base_domain: kubesoar.com
+    
+    # VM definitions for 3 master nodes
+    okd_vms:
+      - name: "{{ cluster_name }}-master-0"
+        mac: "52:54:00:00:00:10"
+        ip: "192.168.1.10"
+        iso: "fcos-master.iso"
+        role: master
+      - name: "{{ cluster_name }}-master-1"
+        mac: "52:54:00:00:00:11"
+        ip: "192.168.1.11"
+        iso: "fcos-master.iso"
+        role: master
+      - name: "{{ cluster_name }}-master-2"
+        mac: "52:54:00:00:00:12"
+        ip: "192.168.1.12"
+        iso: "fcos-master.iso"
+        role: master
+
+    # Bootstrap node (temporary, can be removed after cluster is up)
+    bootstrap_vm:
+      name: "{{ cluster_name }}-bootstrap"
+      mac: "52:54:00:00:00:09"
+      ip: "192.168.1.9"
+      iso: "fcos-bootstrap.iso"
+      role: bootstrap
+
+  tasks:
+    - name: Ensure libvirt is running
+      ansible.builtin.service:
+        name: libvirtd
+        state: started
+        enabled: true
+
+    - name: Create VM disk images directory
+      ansible.builtin.file:
+        path: "{{ iso_dest_path }}"
+        state: directory
+        mode: '0755'
+
+    # Create Bootstrap VM
+    - name: Create bootstrap VM disk
+      ansible.builtin.command:
+        cmd: >
+          qemu-img create -f qcow2
+          {{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2
+          {{ vm_disk_size_gb }}G
+        creates: "{{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2"
+
+    - name: Define bootstrap VM
+      ansible.builtin.command:
+        cmd: >
+          virt-install
+          --name {{ bootstrap_vm.name }}
+          --ram {{ vm_memory_mb }}
+          --vcpus {{ vm_cpus }}
+          --disk path={{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2,format=qcow2,bus=virtio
+          --cdrom {{ iso_dest_path }}/{{ bootstrap_vm.iso }}
+          --network network={{ vm_network }},mac={{ bootstrap_vm.mac }}
+          --os-variant fedora-coreos-stable
+          --graphics vnc,listen=0.0.0.0
+          --noautoconsole
+          --boot hd,cdrom
+          --print-xml
+      register: bootstrap_xml
+      changed_when: false
+
+    - name: Check if bootstrap VM exists
+      ansible.builtin.command:
+        cmd: virsh dominfo {{ bootstrap_vm.name }}
+      register: bootstrap_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Create bootstrap VM from XML
+      ansible.builtin.shell:
+        cmd: |
+          virt-install \
+            --name {{ bootstrap_vm.name }} \
+            --ram {{ vm_memory_mb }} \
+            --vcpus {{ vm_cpus }} \
+            --disk path={{ iso_dest_path }}/{{ bootstrap_vm.name }}.qcow2,format=qcow2,bus=virtio \
+            --cdrom {{ iso_dest_path }}/{{ bootstrap_vm.iso }} \
+            --network network={{ vm_network }},mac={{ bootstrap_vm.mac }} \
+            --os-variant fedora-coreos-stable \
+            --graphics vnc,listen=0.0.0.0 \
+            --noautoconsole \
+            --boot hd,cdrom
+      when: bootstrap_exists.rc != 0
+
+    # Create Master VMs
+    - name: Create master VM disks
+      ansible.builtin.command:
+        cmd: >
+          qemu-img create -f qcow2
+          {{ iso_dest_path }}/{{ item.name }}.qcow2
+          {{ vm_disk_size_gb }}G
+        creates: "{{ iso_dest_path }}/{{ item.name }}.qcow2"
+      loop: "{{ okd_vms }}"
+
+    - name: Check if master VMs exist
+      ansible.builtin.command:
+        cmd: virsh dominfo {{ item.name }}
+      register: master_exists
+      failed_when: false
+      changed_when: false
+      loop: "{{ okd_vms }}"
+
+    - name: Create master VMs
+      ansible.builtin.shell:
+        cmd: |
+          virt-install \
+            --name {{ item.item.name }} \
+            --ram {{ vm_memory_mb }} \
+            --vcpus {{ vm_cpus }} \
+            --disk path={{ iso_dest_path }}/{{ item.item.name }}.qcow2,format=qcow2,bus=virtio \
+            --cdrom {{ iso_dest_path }}/{{ item.item.iso }} \
+            --network network={{ vm_network }},mac={{ item.item.mac }} \
+            --os-variant fedora-coreos-stable \
+            --graphics vnc,listen=0.0.0.0 \
+            --noautoconsole \
+            --boot hd,cdrom
+      loop: "{{ master_exists.results }}"
+      when: item.rc != 0
+
+    - name: Display VM information
+      ansible.builtin.debug:
+        msg:
+          - "VMs created successfully!"
+          - "Bootstrap: {{ bootstrap_vm.name }} - {{ bootstrap_vm.ip }}"
+          - "Master 0: {{ okd_vms[0].name }} - {{ okd_vms[0].ip }}"
+          - "Master 1: {{ okd_vms[1].name }} - {{ okd_vms[1].ip }}"
+          - "Master 2: {{ okd_vms[2].name }} - {{ okd_vms[2].ip }}"
+          - ""
+          - "Next steps:"
+          - "1. Ensure DNS records are configured for all nodes"
+          - "2. Wait for bootstrap to complete: make wait-bootstrap"
+          - "3. Remove bootstrap VM after completion"
+          - "4. Wait for install to complete: make wait-install"

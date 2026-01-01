@@ -1,0 +1,39 @@
+---
+# Ansible playbook to copy OKD ISOs to the libvirt server
+# Usage: ansible-playbook -i inventory.yml copy-iso.yml
+
+- name: Copy OKD ISOs to libvirt server
+  hosts: libvirt_hosts
+  gather_facts: true
+  vars:
+    local_iso_dir: "{{ playbook_dir }}/../"
+    bootstrap_iso: "fcos-bootstrap.iso"
+    master_iso: "fcos-master.iso"
+
+  tasks:
+    - name: Ensure destination directory exists
+      ansible.builtin.file:
+        path: "{{ iso_dest_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy bootstrap ISO to server
+      ansible.builtin.copy:
+        src: "{{ local_iso_dir }}/{{ bootstrap_iso }}"
+        dest: "{{ iso_dest_path }}/{{ bootstrap_iso }}"
+        mode: '0644'
+      register: bootstrap_copy
+
+    - name: Copy master ISO to server
+      ansible.builtin.copy:
+        src: "{{ local_iso_dir }}/{{ master_iso }}"
+        dest: "{{ iso_dest_path }}/{{ master_iso }}"
+        mode: '0644'
+      register: master_copy
+
+    - name: Display copy results
+      ansible.builtin.debug:
+        msg:
+          - "Bootstrap ISO: {{ 'Copied' if bootstrap_copy.changed else 'Already present' }}"
+          - "Master ISO: {{ 'Copied' if master_copy.changed else 'Already present' }}"
+          - "ISOs are now at: {{ iso_dest_path }}"

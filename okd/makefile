@@ -1,12 +1,26 @@
-# Makefile for Single Node OKD Install
+# Makefile for OKD 3-Node Master Cluster with Libvirt
 
 OKD_VERSION ?= 4.20.0-okd-scos.8
 ARCH ?= x86_64
 CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
-DISK_ID ?= wwn-0x500a0751435cebaf
 SSH_KEY ?= ~/.ssh/id_ed25519.pub
-NODE_IP ?= 192.168.1.9
+MACHINE_NETWORK_CIDR ?= 192.168.0.0/21
+
+# Node IPs for 3 master nodes
+MASTER0_IP ?= 192.168.1.10
+MASTER1_IP ?= 192.168.1.11
+MASTER2_IP ?= 192.168.1.12
+API_VIP ?= 192.168.1.9
+
+# Libvirt VM settings
+VM_CPUS ?= 4
+VM_MEMORY ?= 41984
+VM_DISK_SIZE ?= 120
+
+# Remote server settings
+SERVER_HOST ?= 192.168.1.100
+SERVER_USER ?= root
 
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
@@ -53,49 +67,62 @@ fcos:
 
 .PHONY: config
 config: ## Generate install-config.yaml using a helper script.
-	./scripts/generate-install-config.sh $(CLUSTER_NAME) $(BASE_DOMAIN) $(DISK_ID) $(SSH_KEY)
+	./scripts/generate-install-config.sh $(CLUSTER_NAME) $(BASE_DOMAIN) $(SSH_KEY) $(MACHINE_NETWORK_CIDR)
 
 
 .PHONY: ignition
-ignition: ## Generate single-node ignition configuration.
-	@echo "📦 Generating ignition configs..."
-	mkdir -p sno
-	cp install-config.yaml sno
-	openshift-install --dir=sno create single-node-ignition-config
+ignition: ## Generate ignition configurations for 3-node cluster.
+	@echo "📦 Generating ignition configs for 3-node cluster..."
+	mkdir -p cluster
+	cp install-config.yaml cluster/
+	openshift-install --dir=cluster create manifests
+	openshift-install --dir=cluster create ignition-configs
+	@echo "✅ Ignition configs created in cluster/"
 
 
 .PHONY: format-sno-files
-format-sno-files: ## Format all .ign and .json files in sno/ using jq.
-	@echo "✨ Formatting .ign and .json files in sno/..."
-	@find sno -type f \( -name '*.ign' -o -name '*.json' \) -exec sh -c 'jq . {} > tmp && mv tmp {}' \;
+format-sno-files: ## Format all .ign and .json files in cluster/ using jq.
+	@echo "✨ Formatting .ign and .json files in cluster/..."
+	@find cluster -type f \( -name '*.ign' -o -name '*.json' \) -exec sh -c 'jq . {} > tmp && mv tmp {}' \;
 	@echo "✅ Files formatted."
 
 
 
 .PHONY: iso
-iso: ## Embed the ignition config into the FCOS ISO.
-	@echo "💾 Embedding ignition into FCOS ISO..."
+iso: ## Create bootable ISOs for bootstrap and master nodes.
+	@echo "💾 Creating master ISO with embedded ignition..."
+	@cp fcos-live.iso fcos-master.iso
 	@podman run --privileged --pull always --rm \
 		-v /dev:/dev \
 		-v /run/udev:/run/udev \
 		-v $(PWD):/data \
 		-w /data \
 		quay.io/coreos/coreos-installer:release \
-		iso ignition embed -fi sno/bootstrap-in-place-for-live-iso.ign fcos-live.iso
+		iso ignition embed -fi cluster/master.ign fcos-master.iso
+	@echo "💾 Creating bootstrap ISO with embedded ignition..."
+	@cp fcos-live.iso fcos-bootstrap.iso
+	@podman run --privileged --pull always --rm \
+		-v /dev:/dev \
+		-v /run/udev:/run/udev \
+		-v $(PWD):/data \
+		-w /data \
+		quay.io/coreos/coreos-installer:release \
+		iso ignition embed -fi cluster/bootstrap.ign fcos-bootstrap.iso
+	@echo "✅ ISOs created: fcos-master.iso, fcos-bootstrap.iso"
 
 
 
 .PHONY: clean
 clean: ## Clean up generated files.
 	@echo "🧹 Cleaning up..."
-	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso
-	rm -rf sno/* install-config.yaml fcos-live.iso _rendered
+	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso fcos-master.iso fcos-bootstrap.iso
+	rm -rf cluster/* install-config.yaml _rendered
 
 
 
 .PHONY: build
-build: ## Build the OKD Single Node Installer e2e with all steps (FCOS, config, ignition, format-sno-files, iso). Does not install oc or openshift-install.
-	@echo "🔨 Building the OKD Single Node Installer..."
+build: ## Build the OKD 3-node cluster installer (FCOS, config, ignition, format, iso).
+	@echo "🔨 Building the OKD 3-Node Cluster Installer..."
 	@$(MAKE) fcos
 	@$(MAKE) config
 	@$(MAKE) ignition
@@ -104,45 +131,55 @@ build: ## Build the OKD Single Node Installer e2e with all steps (FCOS, config, 
 
 
 .PHONY: use-kubeconfig
-use-kubeconfig: ## Replace ~/.kube/config with sno/auth/kubeconfig
-	@echo "🔁 Replacing ~/.kube/config with sno/auth/kubeconfig..."
-	@pushd sno/auth > /dev/null && \
+use-kubeconfig: ## Replace ~/.kube/config with cluster/auth/kubeconfig
+	@echo "🔁 Replacing ~/.kube/config with cluster/auth/kubeconfig..."
+	@pushd cluster/auth > /dev/null && \
 	if [ -f kubeconfig ]; then \
 	  mkdir -p $$HOME/.kube && \
 	  cp kubeconfig $$HOME/.kube/config && \
 	  chmod 600 $$HOME/.kube/config && \
 	  echo "✅ kubeconfig moved to ~/.kube/config"; \
 	else \
-	  echo "❌ kubeconfig not found in sno/auth"; \
+	  echo "❌ kubeconfig not found in cluster/auth"; \
 	fi && \
 	popd > /dev/null
 
 
 .PHONY: clean-known-hosts
-clean-known-hosts: ## Remove entries with node IP from known_hosts.
-	@echo "🧼 Cleaning known_hosts entries for node IP..."
-	@if [ -z "$(NODE_IP)" ]; then \
-	  echo "❌ NODE_IP not set. Run with: make clean-known-hosts NODE_IP=192.168.x.x"; \
-	  exit 1; \
-	fi
+clean-known-hosts: ## Remove entries with master IPs from known_hosts.
+	@echo "🧼 Cleaning known_hosts entries for master IPs..."
 	@KNOWN_HOSTS_FILE=$$HOME/.ssh/known_hosts; \
 	if [ -f $$KNOWN_HOSTS_FILE ]; then \
-	  grep -v "$(NODE_IP)" $$KNOWN_HOSTS_FILE > $$KNOWN_HOSTS_FILE.tmp && \
+	  grep -v "$(MASTER0_IP)\|$(MASTER1_IP)\|$(MASTER2_IP)" $$KNOWN_HOSTS_FILE > $$KNOWN_HOSTS_FILE.tmp && \
 	  mv $$KNOWN_HOSTS_FILE.tmp $$KNOWN_HOSTS_FILE && \
-	  echo "✅ Removed entries for IP: $(NODE_IP)"; \
+	  echo "✅ Removed entries for master IPs"; \
 	else \
 	  echo "⚠️ No known_hosts file found at $$KNOWN_HOSTS_FILE"; \
 	fi
 
 
 .PHONY: watch-bootstrap
-watch-bootstrap: ## SSH into the node and tail release-image and bootkube logs.
-	@echo "👀 Watching bootstrap services on node..."
-	@if [ -z "$(NODE_IP)" ]; then \
-	  echo "❌ NODE_IP not set. Usage: make watch-bootstrap NODE_IP=192.168.1.6"; \
-	  exit 1; \
-	fi
-	@ssh core@$(NODE_IP) "journalctl -b -f -u release-image.service -u bootkube.service"
+watch-bootstrap: ## SSH into bootstrap node and tail logs.
+	@echo "👀 Watching bootstrap services on bootstrap node..."
+	@ssh core@$(MASTER0_IP) "journalctl -b -f -u release-image.service -u bootkube.service"
+
+
+.PHONY: wait-bootstrap
+wait-bootstrap: ## Wait for bootstrap to complete.
+	@echo "⏳ Waiting for bootstrap to complete..."
+	openshift-install --dir=cluster wait-for bootstrap-complete --log-level=info
+
+
+.PHONY: wait-install
+wait-install: ## Wait for installation to complete.
+	@echo "⏳ Waiting for installation to complete..."
+	openshift-install --dir=cluster wait-for install-complete --log-level=info
+
+
+.PHONY: approve-csrs
+approve-csrs: ## Approve pending CSRs for nodes.
+	@echo "✅ Approving pending CSRs..."
+	@oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' | xargs -r oc adm certificate approve
 
 
 
@@ -169,19 +206,21 @@ ignition-from-manifests: ## Generate ignition configs from customized manifests 
 	  echo "❌ No manifests found. Run 'make render-manifests' first and customize."; \
 	  exit 1; \
 	fi
-	openshift-install create single-node-ignition-config --dir=_rendered
+	openshift-install create ignition-configs --dir=_rendered
 	@echo "✅ Ignition configs generated in _rendered/"
-	@echo "📁 Copying to sno/ for ISO embedding..."
-	mkdir -p sno/auth
-	cp _rendered/bootstrap-in-place-for-live-iso.ign sno/
-	cp _rendered/metadata.json sno/
-	cp -r _rendered/auth/* sno/auth/
-	@echo "✅ Files ready. Run 'make iso' to embed into the FCOS ISO."
+	@echo "📁 Copying to cluster/ for ISO embedding..."
+	mkdir -p cluster/auth
+	cp _rendered/master.ign cluster/
+	cp _rendered/bootstrap.ign cluster/
+	cp _rendered/worker.ign cluster/
+	cp _rendered/metadata.json cluster/
+	cp -r _rendered/auth/* cluster/auth/
+	@echo "✅ Files ready. Run 'make iso' to create the ISOs."
 
 
 .PHONY: build-custom
 build-custom: ## Build with custom manifests: fcos → config → render-manifests → (pause to edit) → ignition-from-manifests → iso
-	@echo "🔨 Building OKD Single Node Installer with custom manifest support..."
+	@echo "🔨 Building OKD 3-Node Cluster with custom manifest support..."
 	@$(MAKE) fcos
 	@$(MAKE) config
 	@$(MAKE) render-manifests

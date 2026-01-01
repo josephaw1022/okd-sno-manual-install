@@ -1,0 +1,40 @@
+---
+# Ansible playbook to destroy OKD VMs
+# Usage: ansible-playbook -i inventory.yml destroy-vms.yml
+
+- name: Destroy OKD VMs on libvirt host
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    
+    vms_to_destroy:
+      - "{{ cluster_name }}-bootstrap"
+      - "{{ cluster_name }}-master-0"
+      - "{{ cluster_name }}-master-1"
+      - "{{ cluster_name }}-master-2"
+
+  tasks:
+    - name: Get list of running VMs
+      ansible.builtin.command:
+        cmd: virsh list --all --name
+      register: vm_list
+      changed_when: false
+
+    - name: Destroy VMs (force stop)
+      ansible.builtin.command:
+        cmd: virsh destroy {{ item }}
+      loop: "{{ vms_to_destroy }}"
+      when: item in vm_list.stdout_lines
+      failed_when: false
+
+    - name: Undefine VMs
+      ansible.builtin.command:
+        cmd: virsh undefine {{ item }} --remove-all-storage
+      loop: "{{ vms_to_destroy }}"
+      when: item in vm_list.stdout_lines
+      failed_when: false
+
+    - name: Display destruction results
+      ansible.builtin.debug:
+        msg: "All OKD VMs have been destroyed and undefined."
