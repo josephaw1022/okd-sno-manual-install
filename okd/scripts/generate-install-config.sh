@@ -82,7 +82,7 @@ hosts:
       dns-resolver:
         config:
           server:
-            - 192.168.1.1
+            - 192.168.1.5
       routes:
         config:
           - destination: 0.0.0.0/0
@@ -107,7 +107,7 @@ hosts:
       dns-resolver:
         config:
           server:
-            - 192.168.1.1
+            - 192.168.1.5
       routes:
         config:
           - destination: 0.0.0.0/0
@@ -132,7 +132,7 @@ hosts:
       dns-resolver:
         config:
           server:
-            - 192.168.1.1
+            - 192.168.1.5
       routes:
         config:
           - destination: 0.0.0.0/0
