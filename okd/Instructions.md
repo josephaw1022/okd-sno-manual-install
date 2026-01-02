@@ -8,7 +8,7 @@ This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 s
 - Network: 192.168.0.0/21 (private router network)
 
 **Reference:**
-[https://docs.okd.io/latest/installing/installing_with_agent_based_installer/preparing-to-install-with-agent-based-installer.html](https://docs.okd.io/latest/installing/installing_with_agent_based_installer/preparing-to-install-with-agent-based-installer.html)
+[OKD Installation on Any Platform](https://docs.okd.io/latest/installing/installing_platform_agnostic/installing-platform-agnostic.html)
 
 
 
