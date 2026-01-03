@@ -1,0 +1,45 @@
+---
+# Ansible playbook to destroy nginx load balancer for OKD
+# Usage: ansible-playbook -i inventory.yml destroy-lb.yml
+
+- name: Destroy nginx load balancer for OKD
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    lb_container_name: okd-lb
+    macvlan_network_name: okd-lb-net
+    nginx_config_dir: /opt/okd-lb
+
+  tasks:
+    - name: Stop container
+      ansible.builtin.command:
+        cmd: sudo podman stop {{ lb_container_name }}
+      changed_when: true
+      failed_when: false
+
+    - name: Remove container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ lb_container_name }}
+      changed_when: true
+      failed_when: false
+
+    - name: Remove macvlan network
+      ansible.builtin.command:
+        cmd: sudo podman network rm {{ macvlan_network_name }}
+      changed_when: true
+      failed_when: false
+
+    - name: Remove nginx config directory
+      ansible.builtin.file:
+        path: "{{ nginx_config_dir }}"
+        state: absent
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "Load balancer destroyed successfully!"
+          - ""
+          - "Removed:"
+          - "  - Container: {{ lb_container_name }}"
+          - "  - Network: {{ macvlan_network_name }}"
+          - "  - Config: {{ nginx_config_dir }}"

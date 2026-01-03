@@ -1,6 +1,6 @@
 # Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
-OKD_VERSION ?= 4.20.0-okd-scos.8
+OKD_VERSION ?= 4.20.0-okd-scos.15
 ARCH ?= x86_64
 CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
@@ -9,7 +9,7 @@ MACHINE_NETWORK_CIDR ?= 192.168.0.0/21
 
 # Node IPs for 3 master nodes
 MASTER0_IP ?= 192.168.1.10
-MASTER1_IP ?= 192.168.1.11
+MASTER1_IP ?= 192.168.1.13
 MASTER2_IP ?= 192.168.1.12
 
 # Gateway/DNS server
@@ -34,9 +34,9 @@ help: ## Show available Makefile commands.
 	/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 .PHONY: deps
-deps: ## Install dependencies (podman).
-	@echo "🔧 Installing dependencies (podman)..."
-	sudo dnf install -y podman
+deps: ## Install dependencies (podman, nmstate).
+	@echo "🔧 Installing dependencies..."
+	sudo dnf install -y podman nmstate
 
 .PHONY: oc
 oc: ## Download the OKD oc CLI.
@@ -169,3 +169,75 @@ render-manifests: ## Render manifests using openshift-install (for inspection/cu
 	openshift-install --dir=_rendered agent create cluster-manifests
 	@echo "✅ Manifests rendered to _rendered/"
 	@echo "📝 Modify files in _rendered/cluster-manifests/ as needed"
+
+
+.PHONY: copy-iso
+copy-iso: ## Copy the agent ISO to the libvirt server via Ansible.
+	@echo "📤 Copying ISO to server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml copy-iso.yml && \
+	popd > /dev/null
+	@echo "✅ ISO copied to server"
+
+
+.PHONY: delete-iso
+delete-iso: ## Delete the agent ISO from the libvirt server via Ansible.
+	@echo "🗑️ Deleting ISO from server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml delete-iso.yml && \
+	popd > /dev/null
+	@echo "✅ ISO deleted from server"
+
+
+.PHONY: create-vms
+create-vms: ## Create the VMs on the libvirt server via Ansible.
+	@echo "🖥️ Creating VMs on server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-vms.yml && \
+	popd > /dev/null
+	@echo "✅ VMs created"
+
+
+.PHONY: destroy-vms
+destroy-vms: ## Destroy all VMs and delete disk images via Ansible.
+	@echo "💥 Destroying VMs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-vms.yml && \
+	popd > /dev/null
+	@echo "✅ VMs destroyed"
+
+
+.PHONY: update-dns
+update-dns: ## Update Pi-hole DNS config for OKD cluster.
+	@echo "🌐 Updating Pi-hole DNS configuration..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml update-pihole-dns.yml && \
+	popd > /dev/null
+	@echo "✅ DNS updated"
+
+
+.PHONY: create-lb
+create-lb: ## Create nginx load balancer container on macvlan network.
+	@echo "🔄 Creating nginx load balancer..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-lb.yml && \
+	popd > /dev/null
+	@echo "✅ Load balancer created"
+
+
+.PHONY: destroy-lb
+destroy-lb: ## Destroy nginx load balancer container and network.
+	@echo "💥 Destroying nginx load balancer..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-lb.yml && \
+	popd > /dev/null
+	@echo "✅ Load balancer destroyed"
+
+
+.PHONY: update-dns-lb
+update-dns-lb: ## Update Pi-hole DNS to point to load balancer.
+	@echo "🌐 Updating Pi-hole DNS to use load balancer..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml update-pihole-dns-lb.yml && \
+	popd > /dev/null
+	@echo "✅ DNS updated to use load balancer"

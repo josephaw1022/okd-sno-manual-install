@@ -1,15 +1,25 @@
 all:
   vars:
-    ansible_user: root
+    ansible_user: jwhiteaker
     ansible_python_interpreter: /usr/bin/python3
+    ansible_become: true
+    ansible_become_method: sudo
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
   children:
     libvirt_hosts:
       hosts:
         okd-server:
-          ansible_host: 192.168.1.100
+          ansible_host: 192.168.1.9
           # VM configuration
           vm_cpus: 4
           vm_memory_mb: 20480  # 20GB per node
           vm_disk_size_gb: 120
           iso_dest_path: /var/lib/libvirt/images
           vm_network: default
+          # Set this to your physical interface for bridged networking
+          # vm_bridge_interface: enp3s0
+    pihole:
+      hosts:
+        pihole-server:
+          ansible_host: 192.168.1.5
+          dnsmasq_conf_dir: /etc/dnsmasq.d

@@ -7,7 +7,6 @@
   gather_facts: false
   vars:
     cluster_name: okd
-    
     vms_to_destroy:
       - "{{ cluster_name }}-master-0"
       - "{{ cluster_name }}-master-1"
@@ -29,11 +28,16 @@
 
     - name: Undefine VMs
       ansible.builtin.command:
-        cmd: virsh undefine {{ item }} --remove-all-storage
+        cmd: virsh undefine {{ item }}
       loop: "{{ vms_to_destroy }}"
-      when: item in vm_list.stdout_lines
       failed_when: false
+
+    - name: Delete VM disk images
+      ansible.builtin.file:
+        path: "{{ iso_dest_path }}/{{ item }}.qcow2"
+        state: absent
+      loop: "{{ vms_to_destroy }}"
 
     - name: Display destruction results
       ansible.builtin.debug:
-        msg: "All OKD VMs have been destroyed and undefined."
+        msg: "All OKD VMs have been destroyed, undefined, and disk images deleted."

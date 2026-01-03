@@ -12,19 +12,24 @@
     cluster_name: okd
     base_domain: kubesoar.com
     agent_iso: "agent.x86_64.iso"
+    target_network: "192.168.1.0"
 
     # VM definitions for 3 master nodes
     # MAC addresses must match those in agent-config.yaml
+    # master-0 is the rendezvous host and gets more memory for bootstrapping
     okd_vms:
       - name: "{{ cluster_name }}-master-0"
         mac: "52:54:00:00:00:10"
         ip: "192.168.1.10"
+        memory_mb: 40960  # 40GB for rendezvous/bootstrap node
       - name: "{{ cluster_name }}-master-1"
         mac: "52:54:00:00:00:11"
-        ip: "192.168.1.11"
+        ip: "192.168.1.13"
+        memory_mb: 20480  # 20GB
       - name: "{{ cluster_name }}-master-2"
         mac: "52:54:00:00:00:12"
         ip: "192.168.1.12"
+        memory_mb: 20480  # 20GB
 
   tasks:
     - name: Ensure libvirt is running
@@ -32,6 +37,22 @@
         name: libvirtd
         state: started
         enabled: true
+
+    - name: Get network interface for 192.168.1.x network
+      ansible.builtin.shell:
+        cmd: |
+          ip -o addr show | grep '192.168.1\.' | awk '{print $2}' | head -1
+      register: physical_interface
+      changed_when: false
+
+    - name: Fail if no interface found
+      ansible.builtin.fail:
+        msg: "Could not find network interface for {{ target_network }}. Check your network configuration."
+      when: physical_interface.stdout == ""
+
+    - name: Display detected interface
+      ansible.builtin.debug:
+        msg: "Using physical interface: {{ physical_interface.stdout }}"
 
     - name: Create VM disk images directory
       ansible.builtin.file:
@@ -56,16 +77,16 @@
       changed_when: false
       loop: "{{ okd_vms }}"
 
-    - name: Create master VMs
+    - name: Create master VMs with macvtap bridged networking
       ansible.builtin.shell:
         cmd: |
           virt-install \
             --name {{ item.item.name }} \
-            --ram {{ vm_memory_mb }} \
+            --ram {{ item.item.memory_mb }} \
             --vcpus {{ vm_cpus }} \
             --disk path={{ iso_dest_path }}/{{ item.item.name }}.qcow2,format=qcow2,bus=virtio \
             --cdrom {{ iso_dest_path }}/{{ agent_iso }} \
-            --network network={{ vm_network }},mac={{ item.item.mac }} \
+            --network type=direct,source={{ physical_interface.stdout }},source_mode=bridge,mac={{ item.item.mac }} \
             --os-variant fedora-coreos-stable \
             --graphics vnc,listen=0.0.0.0 \
             --noautoconsole \

@@ -1,0 +1,4 @@
+# Don't commit sensitive credential files
+group_vars/all.yml
+*.vault
+.vault_pass

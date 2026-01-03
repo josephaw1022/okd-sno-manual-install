@@ -1,0 +1,28 @@
+---
+# Ansible playbook to delete OKD agent ISO from the libvirt server
+# Usage: ansible-playbook -i inventory.yml delete-iso.yml
+
+- name: Delete OKD agent ISO from libvirt server
+  hosts: libvirt_hosts
+  gather_facts: true
+  vars:
+    agent_iso: "agent.x86_64.iso"
+
+  tasks:
+    - name: Check if agent ISO exists
+      ansible.builtin.stat:
+        path: "{{ iso_dest_path }}/{{ agent_iso }}"
+      register: iso_file
+
+    - name: Delete agent ISO from server
+      ansible.builtin.file:
+        path: "{{ iso_dest_path }}/{{ agent_iso }}"
+        state: absent
+      when: iso_file.stat.exists
+      register: iso_delete
+
+    - name: Display delete results
+      ansible.builtin.debug:
+        msg:
+          - "Agent ISO: {{ 'Deleted' if iso_delete.changed | default(false) else 'Not present' }}"
+          - "ISO location: {{ iso_dest_path }}/{{ agent_iso }}"

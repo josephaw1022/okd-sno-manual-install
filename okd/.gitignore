@@ -5,6 +5,14 @@ fcos-live.iso
 
 install-config.yaml
 install-config.yml
+agent-config.yaml
 
-
+cluster/
 _rendered
+
+*.log
+*.env
+tmp/
+*.tfstate
+
+

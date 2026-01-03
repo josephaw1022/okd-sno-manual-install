@@ -1,0 +1,52 @@
+---
+# Ansible playbook to update Pi-hole DNS config for OKD cluster
+# Usage: ansible-playbook -i inventory.yml update-pihole-dns.yml
+
+- name: Update Pi-hole DNS configuration for OKD
+  hosts: pihole
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    base_domain: kubesoar.com
+    dnsmasq_config_file: "{{ cluster_name }}.conf"
+    lb_ip: 192.168.1.20
+    master_ips:
+      - "192.168.1.10"
+      - "192.168.1.13"
+      - "192.168.1.12"
+
+  tasks:
+    - name: Copy OKD dnsmasq config to Pi-hole
+      ansible.builtin.copy:
+        src: ../dnsmasq/okd.conf
+        dest: "{{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart pihole-FTL
+
+    - name: Verify pihole-FTL config
+      ansible.builtin.command:
+        cmd: pihole-FTL --test
+      changed_when: false
+      failed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "DNS configuration updated successfully!"
+          - "Config file: {{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+          - ""
+          - "DNS records configured:"
+          - "  api.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }} (load balancer)"
+          - "  api-int.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }} (load balancer)"
+          - "  *.apps.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }} (load balancer)"
+          - "  master-0.{{ cluster_name }}.{{ base_domain }} -> {{ master_ips[0] }}"
+          - "  master-1.{{ cluster_name }}.{{ base_domain }} -> {{ master_ips[1] }}"
+          - "  master-2.{{ cluster_name }}.{{ base_domain }} -> {{ master_ips[2] }}"
+
+  handlers:
+    - name: Restart pihole-FTL
+      ansible.builtin.service:
+        name: pihole-FTL
+        state: restarted

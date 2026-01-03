@@ -1,0 +1,45 @@
+---
+# Ansible playbook to update Pi-hole DNS to use load balancer
+# Usage: ansible-playbook -i inventory.yml update-pihole-dns-lb.yml
+
+- name: Update Pi-hole DNS to use load balancer
+  hosts: pihole
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    base_domain: kubesoar.com
+    dnsmasq_config_file: "{{ cluster_name }}.conf"
+    lb_ip: 192.168.1.20
+
+  tasks:
+    - name: Copy OKD dnsmasq config (load balancer version) to Pi-hole
+      ansible.builtin.copy:
+        src: ../dnsmasq/okd-lb.conf
+        dest: "{{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart pihole-FTL
+
+    - name: Verify pihole-FTL config
+      ansible.builtin.command:
+        cmd: pihole-FTL --test
+      changed_when: false
+      failed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "DNS configuration updated to use load balancer!"
+          - "Config file: {{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+          - ""
+          - "DNS records now pointing to load balancer ({{ lb_ip }}):"
+          - "  api.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }}"
+          - "  api-int.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }}"
+          - "  *.apps.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }}"
+
+  handlers:
+    - name: Restart pihole-FTL
+      ansible.builtin.service:
+        name: pihole-FTL
+        state: restarted

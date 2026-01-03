@@ -1,0 +1,103 @@
+---
+# Ansible playbook to create nginx load balancer for OKD
+# Usage: ansible-playbook -i inventory.yml create-lb.yml
+
+- name: Create nginx load balancer for OKD
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    lb_container_name: okd-lb
+    lb_ip: 192.168.1.20
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_interface: eno1
+    macvlan_network_name: okd-lb-net
+    nginx_config_dir: /opt/okd-lb
+
+  tasks:
+    - name: Create nginx config directory
+      ansible.builtin.file:
+        path: "{{ nginx_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy nginx config
+      ansible.builtin.copy:
+        src: nginx-lb/nginx.conf
+        dest: "{{ nginx_config_dir }}/nginx.conf"
+        mode: '0644'
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ lb_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start nginx load balancer container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ lb_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ lb_ip }}
+          --restart always
+          --health-cmd "nginx -t || exit 1"
+          --health-interval 30s
+          --health-retries 3
+          --health-timeout 10s
+          --health-start-period 10s
+          -v {{ nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+          docker.io/nginx:alpine
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ lb_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ lb_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 10
+      delay: 2
+      changed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "Load balancer created successfully!"
+          - ""
+          - "Container: {{ lb_container_name }}"
+          - "IP Address: {{ lb_ip }}"
+          - "Network: {{ macvlan_network_name }}"
+          - ""
+          - "Load balancing:"
+          - "  API (6443) -> masters"
+          - "  Machine Config (22623) -> masters"
+          - "  HTTP (80) -> masters"
+          - "  HTTPS (443) -> masters"
+          - ""
+          - "Now update DNS to point api/api-int/apps to {{ lb_ip }}"

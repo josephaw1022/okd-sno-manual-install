@@ -134,14 +134,13 @@ all:
 ### Step 4: Copy ISO to Server
 
 ```bash
-cd ansible
-ansible-playbook -i inventory.yml copy-iso.yml
+make copy-iso
 ```
 
 ### Step 5: Create VMs
 
 ```bash
-ansible-playbook -i inventory.yml create-vms.yml
+make create-vms
 ```
 
 This creates 3 master VMs, all booting from the same agent ISO. The first node (master-0) is the "rendezvous" host that coordinates the installation.
