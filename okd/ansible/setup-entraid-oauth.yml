@@ -1,0 +1,267 @@
+---
+# Ansible playbook to configure Entra ID (Azure AD) OAuth for OKD
+# Usage: ansible-playbook -i inventory.yml setup-entraid-oauth.yml
+#
+# Prerequisites:
+#   - Azure CLI logged in (az login)
+#   - ansible-galaxy install -r requirements.yml
+#
+# Required variables (set in group_vars/all.yml or pass with -e):
+#   - azure_tenant_id: Your Azure tenant ID
+#   - azure_subscription_id: Your Azure subscription ID
+#   - okd_cluster_name: OKD cluster name (default: okd)
+#   - okd_base_domain: OKD base domain (default: kubesoar.com)
+
+- name: Configure Entra ID OAuth for OKD
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    HOME: "{{ lookup('env', 'HOME') }}"
+    AZURE_CONFIG_DIR: "{{ lookup('env', 'HOME') }}/.azure"
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    # OKD settings
+    okd_cluster_name: "{{ lookup('env', 'OKD_CLUSTER_NAME') | default('okd', true) }}"
+    okd_base_domain: "{{ lookup('env', 'OKD_BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    
+    # Azure settings - must be provided
+    azure_tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
+    azure_subscription_id: "{{ lookup('env', 'AZURE_SUBSCRIPTION_ID') }}"
+    
+    # App registration settings
+    app_display_name: "OKD-{{ okd_cluster_name }}-OAuth"
+    oauth_redirect_uri: "https://oauth-openshift.apps.{{ okd_cluster_name }}.{{ okd_base_domain }}/oauth2callback/azure"
+    
+    # OpenShift secret settings
+    oauth_secret_name: "azure-oauth-client-secret"
+    oauth_namespace: "openshift-config"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - azure_tenant_id | length > 0
+          - azure_subscription_id | length > 0
+        fail_msg: |
+          Missing required Azure credentials!
+          Please set these environment variables or pass them with -e:
+            - AZURE_TENANT_ID (or azure_tenant_id)
+            - AZURE_SUBSCRIPTION_ID (or azure_subscription_id)
+          
+          Or run: az login && export AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
+
+    - name: Display configuration
+      ansible.builtin.debug:
+        msg:
+          - "Configuring Entra ID OAuth for OKD"
+          - ""
+          - "App Name: {{ app_display_name }}"
+          - "Redirect URI: {{ oauth_redirect_uri }}"
+          - "Tenant ID: {{ azure_tenant_id }}"
+
+    # Step 1: Create Azure AD App Registration
+    - name: Check if app registration already exists
+      ansible.builtin.command:
+        cmd: >
+          az ad app list
+          --display-name "{{ app_display_name }}"
+          --query "[0].appId"
+          -o tsv
+      register: existing_app
+      changed_when: false
+      failed_when: false
+
+    - name: Create app registration
+      ansible.builtin.command:
+        cmd: >
+          az ad app create
+          --display-name "{{ app_display_name }}"
+          --web-redirect-uris "{{ oauth_redirect_uri }}"
+          --sign-in-audience AzureADMyOrg
+          --query "appId"
+          -o tsv
+      register: app_create
+      when: existing_app.stdout | length == 0
+
+    - name: Set app client ID
+      ansible.builtin.set_fact:
+        app_client_id: "{{ existing_app.stdout if existing_app.stdout | length > 0 else app_create.stdout }}"
+
+    - name: Display app client ID
+      ansible.builtin.debug:
+        msg: "App Client ID: {{ app_client_id }}"
+
+    # Step 2: Configure redirect URI if app already existed
+    - name: Update redirect URI for existing app
+      ansible.builtin.command:
+        cmd: >
+          az ad app update
+          --id {{ app_client_id }}
+          --web-redirect-uris "{{ oauth_redirect_uri }}"
+      when: existing_app.stdout | length > 0
+      changed_when: true
+
+    # Step 3: Add optional claims for tokens
+    - name: Configure optional claims (email, groups, preferred_username)
+      ansible.builtin.command:
+        cmd: >
+          az ad app update
+          --id {{ app_client_id }}
+          --optional-claims '{
+            "idToken": [
+              {"name": "email", "essential": false},
+              {"name": "groups", "essential": false},
+              {"name": "preferred_username", "essential": false}
+            ],
+            "accessToken": [
+              {"name": "email", "essential": false},
+              {"name": "groups", "essential": false},
+              {"name": "preferred_username", "essential": false}
+            ]
+          }'
+      changed_when: true
+
+    # Step 4: Add API permissions (User.Read and email)
+    - name: Add Microsoft Graph User.Read permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions e1fe6dd8-ba31-4d61-89e7-88639da4683d=Scope
+      register: user_read_perm
+      changed_when: "'already exists' not in user_read_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph email permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0=Scope
+      register: email_perm
+      changed_when: "'already exists' not in email_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph openid permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 37f7f235-527c-4136-accd-4a02d197296e=Scope
+      register: openid_perm
+      changed_when: "'already exists' not in openid_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph profile permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 14dad69e-099b-42c9-810b-d002981feec1=Scope
+      register: profile_perm
+      changed_when: "'already exists' not in profile_perm.stderr"
+      failed_when: false
+
+    # Step 5: Create client secret
+    - name: Create client secret
+      ansible.builtin.command:
+        cmd: >
+          az ad app credential reset
+          --id {{ app_client_id }}
+          --display-name "OKD-OAuth-Secret"
+          --years 2
+          --query "password"
+          -o tsv
+      register: client_secret
+      no_log: true
+
+    - name: Store client secret for later use
+      ansible.builtin.set_fact:
+        oauth_client_secret: "{{ client_secret.stdout }}"
+      no_log: true
+
+    # Step 6: Create service principal if it doesn't exist
+    - name: Check if service principal exists
+      ansible.builtin.command:
+        cmd: >
+          az ad sp list
+          --filter "appId eq '{{ app_client_id }}'"
+          --query "[0].id"
+          -o tsv
+      register: existing_sp
+      changed_when: false
+      failed_when: false
+
+    - name: Create service principal
+      ansible.builtin.command:
+        cmd: az ad sp create --id {{ app_client_id }}
+      when: existing_sp.stdout | length == 0
+      register: sp_create
+      failed_when: false
+
+    # Step 7: Create OpenShift secret with client secret using kubernetes.core
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: "{{ oauth_namespace }}"
+      register: oc_check
+      failed_when: false
+
+    - name: Create OAuth client secret in OpenShift
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ oauth_secret_name }}"
+            namespace: "{{ oauth_namespace }}"
+          type: Opaque
+          stringData:
+            clientSecret: "{{ oauth_client_secret }}"
+      when: oc_check.resources is defined and oc_check.resources | length > 0
+      no_log: true
+
+    # Step 8: Generate OAuth resource YAML
+    - name: Generate OAuth resource file
+      ansible.builtin.template:
+        src: templates/entraid-oauth.yaml.j2
+        dest: "{{ playbook_dir }}/../cluster-setup/entraid-oauth-generated.yaml"
+        mode: '0644'
+
+    # Step 9: Apply OAuth configuration to OpenShift using kubernetes.core
+    - name: Apply OAuth configuration to OpenShift
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ playbook_dir }}/../cluster-setup/entraid-oauth-generated.yaml"
+      when: oc_check.resources is defined and oc_check.resources | length > 0
+      register: oauth_apply
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================"
+          - "Entra ID OAuth Configuration Complete!"
+          - "============================================"
+          - ""
+          - "App Registration Details:"
+          - "  Display Name: {{ app_display_name }}"
+          - "  Client ID: {{ app_client_id }}"
+          - "  Tenant ID: {{ azure_tenant_id }}"
+          - "  Redirect URI: {{ oauth_redirect_uri }}"
+          - ""
+          - "OpenShift Resources:"
+          - "  Secret: {{ oauth_secret_name }} (namespace: {{ oauth_namespace }})"
+          - "  OAuth Config: Applied to cluster"
+          - ""
+          - "Generated file: cluster-setup/entraid-oauth-generated.yaml"
+          - ""
+          - "{% if oc_check.resources is not defined or oc_check.resources | length == 0 %}NOTE: Not connected to OpenShift. Run manually:\n  oc create secret generic {{ oauth_secret_name }} --from-literal=clientSecret=<secret> -n {{ oauth_namespace }}\n  oc apply -f cluster-setup/entraid-oauth-generated.yaml{% endif %}"

@@ -218,32 +218,10 @@ sudo certbot certonly \
 
 Add the TXT record in your DNS → wait for propagation.
 
-#### 2. Copy & Apply Certificate
+#### 2. Apply Certificate to Cluster
 
 ```bash
-sudo cp /etc/letsencrypt/live/apps.okd.kubesoar.com/fullchain.pem .
-sudo cp /etc/letsencrypt/live/apps.okd.kubesoar.com/privkey.pem .
-
-sudo chown $USER:$USER fullchain.pem privkey.pem
-chmod 600 fullchain.pem privkey.pem
-
-oc create secret tls wildcard-apps-okd-kubesoar \
-  -n openshift-ingress \
-  --cert=fullchain.pem \
-  --key=privkey.pem \
-  --dry-run=client -o yaml | oc apply -f -
-
-oc patch ingresscontroller default \
-  -n openshift-ingress-operator \
-  --type=merge \
-  -p '{"spec":{"defaultCertificate":{"name":"wildcard-apps-okd-kubesoar"}}}'
-```
-
-#### 3. Restart Ingress Pods
-
-```bash
-oc delete pod -n openshift-ingress \
-  -l ingresscontroller.operator.openshift.io/owning-ingresscontroller=default
+make apply-ingress-cert
 ```
 
 ---
@@ -262,8 +240,7 @@ ssh -i ~/.ssh/id_ed25519 core@192.168.1.12  # master-2
 
 ```bash
 # Destroy all VMs
-cd ansible
-ansible-playbook -i inventory.yml destroy-vms.yml
+make destroy-vms
 
 # Clean generated files
 make clean

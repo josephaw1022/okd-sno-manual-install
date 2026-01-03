@@ -1,0 +1,7 @@
+---
+# Ansible Galaxy requirements for OKD automation playbooks
+# Install with: ansible-galaxy install -r requirements.yml
+
+collections:
+  - name: kubernetes.core
+    version: ">=3.0.0"

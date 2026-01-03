@@ -234,3 +234,38 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 	@echo "✅ Load balancer destroyed"
 
 
+.PHONY: setup-entraid
+setup-entraid: ## Configure Entra ID (Azure AD) OAuth for OKD cluster.
+	@echo "🔐 Setting up Entra ID OAuth..."
+	@pushd ansible > /dev/null && \
+	TENANT=$${AZURE_TENANT_ID:-$$(az account show --query tenantId -o tsv 2>/dev/null)}; \
+	SUB=$${AZURE_SUBSCRIPTION_ID:-$$(az account show --query id -o tsv 2>/dev/null)}; \
+	if [ -z "$$TENANT" ] || [ -z "$$SUB" ]; then \
+		echo "❌ Azure credentials not found. Run 'az login' first."; \
+		exit 1; \
+	fi; \
+	ansible-playbook -i inventory.yml setup-entraid-oauth.yml \
+		-e "azure_tenant_id=$$TENANT" \
+		-e "azure_subscription_id=$$SUB" && \
+	popd > /dev/null
+	@echo "✅ Entra ID OAuth configured"
+
+
+.PHONY: ansible-deps
+ansible-deps: ## Install Ansible Galaxy collection dependencies.
+	@echo "📦 Installing Ansible Galaxy requirements..."
+	@pushd ansible > /dev/null && \
+	ansible-galaxy install -r requirements.yml && \
+	popd > /dev/null
+	@echo "✅ Ansible dependencies installed"
+
+
+.PHONY: apply-ingress-cert
+apply-ingress-cert: ## Apply Let's Encrypt wildcard cert to OKD ingress.
+	@echo "🔒 Applying ingress certificate..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml apply-ingress-cert.yml && \
+	popd > /dev/null
+	@echo "✅ Ingress certificate applied"
+
+

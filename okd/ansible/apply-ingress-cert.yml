@@ -1,0 +1,114 @@
+---
+# Ansible playbook to apply Let's Encrypt wildcard certificate to OKD ingress
+# Usage: ansible-playbook -i inventory.yml apply-ingress-cert.yml
+#
+# Prerequisites:
+#   - Let's Encrypt certificate generated with certbot
+#   - Connected to OpenShift cluster (oc login)
+#
+# Variables (can override with -e):
+#   - cert_domain: Domain for the certificate (default: apps.okd.kubesoar.com)
+#   - secret_name: Name of the TLS secret (default: wildcard-apps-okd-kubesoar)
+
+- name: Apply Let's Encrypt certificate to OKD ingress
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cert_domain: "{{ lookup('env', 'CERT_DOMAIN') | default('apps.okd.kubesoar.com', true) }}"
+    secret_name: "{{ lookup('env', 'CERT_SECRET_NAME') | default('wildcard-apps-okd-kubesoar', true) }}"
+    letsencrypt_dir: "/etc/letsencrypt/live/{{ cert_domain }}"
+    ingress_namespace: "openshift-ingress"
+    ingress_operator_namespace: "openshift-ingress-operator"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: "{{ ingress_namespace }}"
+      register: oc_check
+      failed_when: false
+      become: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Check if Let's Encrypt certificates exist
+      ansible.builtin.stat:
+        path: "{{ letsencrypt_dir }}/fullchain.pem"
+      register: cert_check
+
+    - name: Fail if certificates don't exist
+      ansible.builtin.fail:
+        msg: |
+          Certificate not found at {{ letsencrypt_dir }}/fullchain.pem
+          
+          Generate it first with:
+            sudo certbot certonly --manual --preferred-challenges dns -d "*.{{ cert_domain }}"
+      when: not cert_check.stat.exists
+
+    - name: Read certificate file
+      ansible.builtin.slurp:
+        src: "{{ letsencrypt_dir }}/fullchain.pem"
+      register: cert_content
+      become: true
+
+    - name: Read private key file
+      ansible.builtin.slurp:
+        src: "{{ letsencrypt_dir }}/privkey.pem"
+      register: key_content
+      become: true
+      no_log: true
+
+    - name: Create/Update TLS secret in openshift-ingress namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ secret_name }}"
+            namespace: "{{ ingress_namespace }}"
+          type: kubernetes.io/tls
+          data:
+            tls.crt: "{{ cert_content.content }}"
+            tls.key: "{{ key_content.content }}"
+      no_log: true
+      become: false
+
+    - name: Patch IngressController to use the new certificate
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operator.openshift.io/v1
+          kind: IngressController
+          metadata:
+            name: default
+            namespace: "{{ ingress_operator_namespace }}"
+          spec:
+            defaultCertificate:
+              name: "{{ secret_name }}"
+        merge_type: merge
+      become: false
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================"
+          - "Ingress Certificate Applied Successfully!"
+          - "============================================"
+          - ""
+          - "Certificate Details:"
+          - "  Domain: *.{{ cert_domain }}"
+          - "  Secret: {{ secret_name }}"
+          - "  Namespace: {{ ingress_namespace }}"
+          - ""
+          - "The console should now show a valid certificate."

@@ -2,11 +2,12 @@ all:
   vars:
     ansible_user: jwhiteaker
     ansible_python_interpreter: /usr/bin/python3
-    ansible_become: true
-    ansible_become_method: sudo
     ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
   children:
     libvirt_hosts:
+      vars:
+        ansible_become: true
+        ansible_become_method: sudo
       hosts:
         okd-server:
           ansible_host: 192.168.1.9
@@ -19,6 +20,9 @@ all:
           # Set this to your physical interface for bridged networking
           # vm_bridge_interface: enp3s0
     pihole:
+      vars:
+        ansible_become: true
+        ansible_become_method: sudo
       hosts:
         pihole-server:
           ansible_host: 192.168.1.5
