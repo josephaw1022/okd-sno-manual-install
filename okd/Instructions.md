@@ -33,32 +33,47 @@ sudo systemctl enable --now libvirtd
 
 ## DNS Setup
 
-You need a DNS server on your private network. Example using Pi-hole/dnsmasq (`/etc/dnsmasq.d/okd.conf`):
+You need a DNS server on your private network. This repo includes an Ansible playbook to configure Pi-hole/dnsmasq automatically.
 
+First, ensure your Pi-hole server is configured in `ansible/inventory.yml`:
+
+```yaml
+pihole:
+  hosts:
+    pihole-server:
+      ansible_host: 192.168.1.5  # Your Pi-hole IP
+      dnsmasq_conf_dir: /etc/dnsmasq.d
 ```
-# API server - points to master-0 (rendezvous host)
-address=/api.okd.kubesoar.com/192.168.1.10
 
-# Internal API
-address=/api-int.okd.kubesoar.com/192.168.1.10
+Then deploy the DNS configuration:
 
-# Apps wildcard - for ingress
-address=/.apps.okd.kubesoar.com/192.168.1.10
+```bash
+make update-dns
+```
 
-# Master nodes
-address=/master-0.okd.kubesoar.com/192.168.1.10
-address=/master-1.okd.kubesoar.com/192.168.1.11
-address=/master-2.okd.kubesoar.com/192.168.1.12
+This copies the dnsmasq config from `dnsmasq/okd.conf` to your Pi-hole server and restarts the DNS service.
 
-# ETCD SRV records
-srv-host=_etcd-server-ssl._tcp.okd.kubesoar.com,master-0.okd.kubesoar.com,2380,0,10
-srv-host=_etcd-server-ssl._tcp.okd.kubesoar.com,master-1.okd.kubesoar.com,2380,0,10
-srv-host=_etcd-server-ssl._tcp.okd.kubesoar.com,master-2.okd.kubesoar.com,2380,0,10
+**Manual Setup:** If you prefer to configure DNS manually, see the example config in `dnsmasq/okd.conf`.
 
-# PTR records
-ptr-record=10.1.168.192.in-addr.arpa,master-0.okd.kubesoar.com
-ptr-record=11.1.168.192.in-addr.arpa,master-1.okd.kubesoar.com
-ptr-record=12.1.168.192.in-addr.arpa,master-2.okd.kubesoar.com
+
+## Load Balancer Setup (Optional but Recommended)
+
+For high availability, set up an nginx load balancer that distributes traffic across all master nodes:
+
+```bash
+# Create the load balancer container on a macvlan network
+make create-lb
+```
+
+This creates an nginx container at `192.168.1.20` that load balances:
+- API server (6443) → all masters
+- Machine Config Server (22623) → all masters  
+- HTTP/HTTPS ingress (80/443) → all masters
+
+To remove the load balancer:
+
+```bash
+make destroy-lb
 ```
 
 
@@ -131,13 +146,24 @@ all:
           vm_disk_size_gb: 120
 ```
 
-### Step 4: Copy ISO to Server
+### Step 4: Create Ansible Credentials File
+
+Create `ansible/group_vars/all.yml` with your SSH/sudo credentials:
+
+```yaml
+# Ansible connection credentials
+# NOTE: For production, encrypt this file with: ansible-vault encrypt group_vars/all.yml
+ansible_password: your_ssh_password
+ansible_become_password: your_sudo_password
+```
+
+### Step 5: Copy ISO to Server
 
 ```bash
 make copy-iso
 ```
 
-### Step 5: Create VMs
+### Step 6: Create VMs
 
 ```bash
 make create-vms
@@ -145,7 +171,7 @@ make create-vms
 
 This creates 3 master VMs, all booting from the same agent ISO. The first node (master-0) is the "rendezvous" host that coordinates the installation.
 
-### Step 6: Monitor Installation
+### Step 7: Monitor Installation
 
 ```bash
 # Wait for install to complete
@@ -155,7 +181,7 @@ make wait-install
 make watch-bootstrap
 ```
 
-### Step 7: Access the Cluster
+### Step 8: Access the Cluster
 
 ```bash
 make use-kubeconfig

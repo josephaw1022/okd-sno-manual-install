@@ -234,10 +234,3 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 	@echo "✅ Load balancer destroyed"
 
 
-.PHONY: update-dns-lb
-update-dns-lb: ## Update Pi-hole DNS to point to load balancer.
-	@echo "🌐 Updating Pi-hole DNS to use load balancer..."
-	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml update-pihole-dns-lb.yml && \
-	popd > /dev/null
-	@echo "✅ DNS updated to use load balancer"
