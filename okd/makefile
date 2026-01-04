@@ -269,3 +269,17 @@ apply-ingress-cert: ## Apply Let's Encrypt wildcard cert to OKD ingress.
 	@echo "✅ Ingress certificate applied"
 
 
+.PHONY: apply-kubelet-config
+apply-kubelet-config: ## Apply kubelet config to increase max pods.
+	@echo "⚙️ Applying kubelet config..."
+	oc apply -f cluster-setup/kubelet-config.yaml
+	@echo "✅ Kubelet config applied"
+
+
+.PHONY: delete-kubelet-config
+delete-kubelet-config: ## Delete kubelet config.
+	@echo "🗑️ Deleting kubelet config..."
+	oc delete -f cluster-setup/kubelet-config.yaml
+	@echo "✅ Kubelet config deleted"
+
+
