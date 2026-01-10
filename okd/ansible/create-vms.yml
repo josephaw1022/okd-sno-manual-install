@@ -21,15 +21,15 @@
       - name: "{{ cluster_name }}-master-0"
         mac: "52:54:00:00:00:10"
         ip: "192.168.1.10"
-        memory_mb: 40960  # 40GB for rendezvous/bootstrap node
+        memory_mb: 30720  # 30GB
       - name: "{{ cluster_name }}-master-1"
         mac: "52:54:00:00:00:11"
         ip: "192.168.1.13"
-        memory_mb: 20480  # 20GB
+        memory_mb: 30720  # 30GB
       - name: "{{ cluster_name }}-master-2"
         mac: "52:54:00:00:00:12"
         ip: "192.168.1.12"
-        memory_mb: 20480  # 20GB
+        memory_mb: 30720  # 30GB
 
   tasks:
     - name: Ensure libvirt is running

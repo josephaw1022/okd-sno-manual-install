@@ -13,8 +13,8 @@ all:
           ansible_host: 192.168.1.9
           # VM configuration
           vm_cpus: 4
-          vm_memory_mb: 20480  # 20GB per node
-          vm_disk_size_gb: 120
+          vm_memory_mb: 30720  # 30 GB per node
+          vm_disk_size_gb: 175
           iso_dest_path: /var/lib/libvirt/images
           vm_network: default
           # Set this to your physical interface for bridged networking

@@ -1,6 +1,6 @@
 # Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
-OKD_VERSION ?= 4.20.0-okd-scos.15
+OKD_VERSION ?= 4.21.0-okd-scos.ec.13
 ARCH ?= x86_64
 CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
@@ -60,6 +60,12 @@ installer: ## Download the OKD openshift-install binary.
 	tar zxvf openshift-install.tar.gz && \
 	chmod +x openshift-install && \
 	sudo mv ./openshift-install /usr/local/bin/
+
+.PHONY: uninstall-installer
+uninstall-installer: ## Remove the openshift-install binary from /usr/local/bin.
+	@echo "🗑️ Removing openshift-install..."
+	sudo rm -f /usr/local/bin/openshift-install
+	@echo "✅ openshift-install removed"
 
 .PHONY: fcos
 fcos: ## Download the FCOS ISO (for reference, agent-iso creates its own).
