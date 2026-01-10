@@ -121,10 +121,9 @@ copy-cilium-manifests: create-manifests download-cilium-manifests ## Download an
 		exit 1; \
 	fi
 	cp -v $(CILIUM_TMP_DIR)/manifests/cilium.v$(CILIUM_VERSION)/* cluster/openshift/
-	@echo "✅ Cilium manifests copied to cluster/openshift/"
-	@echo ""
-	@echo "📝 You can customize cluster/openshift/cluster-network-07-cilium-ciliumconfig.yaml"
-	@echo "   to configure Hubble, metrics, and other Cilium options."
+	chmod +x ./scripts/generate-cilium-config.sh
+	./scripts/generate-cilium-config.sh $(CLUSTER_NAME) $(BASE_DOMAIN)
+	@echo "✅ Cilium manifests copied and CiliumConfig customized"
 
 
 .PHONY: clean-cilium-tmp
