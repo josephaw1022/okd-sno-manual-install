@@ -133,17 +133,11 @@ make build
 ```
 
 This will:
-1. Generate `install-config.yaml` for 3-node cluster (with `networkType: Cilium`)
+1. Generate `install-config.yaml` for 3-node cluster (with `networkType: None` to skip default CNI)
 2. Generate `agent-config.yaml` with static IPs and MAC addresses
-3. Download Cilium v1.15.1 manifests from [isovalent/olm-for-cilium](https://github.com/isovalent/olm-for-cilium)
-4. Copy Cilium manifests to `cluster/openshift/`
-5. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
-6. Clean up temporary Cilium files
+3. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
 
-**To use a different Cilium version:**
-```bash
-make build CILIUM_VERSION=1.14.7
-```
+**Note:** Cilium CNI is installed post-bootstrap via `make install-cilium` (see Step 7). The embedded manifest approach doesn't work because the bootstrap node can't apply manifests without network connectivity.
 
 **Important:** The `agent-config.yaml` maps MAC addresses to IPs. Make sure the MAC addresses in the config match what you'll use in the VMs.
 
@@ -188,7 +182,34 @@ make create-vms
 
 This creates 3 master VMs, all booting from the same agent ISO. The first node (master-0) is the "rendezvous" host that coordinates the installation.
 
-### Step 7: Monitor Installation
+### Step 7: Wait for Nodes to Boot and Install Cilium CNI
+
+After running `make create-vms`, the VMs will boot and begin the agent-based installation process. However, since we use `networkType: None` in the install config, the cluster won't have a CNI and pods won't be able to communicate.
+
+**Important:** The bootstrap process will stall until you install Cilium CNI.
+
+1. **Wait for the 2 non-rendezvous master nodes to shut down** - After initial boot, master-1 and master-2 will install CoreOS and then power off.
+
+2. **Start all VMs:**
+   ```bash
+   make start-vms
+   ```
+
+3. **Install Cilium CNI** - This is required for the bootstrap to proceed:
+   ```bash
+   make install-cilium
+   ```
+   
+   This installs Cilium with the correct CNI paths for OKD (`/etc/kubernetes/cni/net.d`). After Cilium is installed, the pods on the bootstrap/rendezvous node will be able to communicate with pods on the other master nodes.
+
+4. **Verify Cilium is running:**
+   ```bash
+   cilium status
+   ```
+   
+   You should see all components showing `OK` and nodes becoming `Ready`.
+
+### Step 8: Monitor Installation
 
 ```bash
 # Wait for install to complete
@@ -198,7 +219,7 @@ make wait-install
 make watch-bootstrap
 ```
 
-### Step 8: Access the Cluster
+### Step 9: Access the Cluster
 
 ```bash
 make use-kubeconfig
@@ -215,14 +236,14 @@ oc get co
 After the cluster is up, verify Cilium is running:
 
 ```bash
-oc get pods -n cilium
-oc get ciliumconfig -n cilium
+cilium status
+oc get pods -n kube-system -l app.kubernetes.io/name=cilium
 ```
 
-To customize Cilium configuration (e.g., enable Hubble metrics):
+To enable Hubble observability:
 
 ```bash
-oc edit ciliumconfig -n cilium cilium
+cilium upgrade --set hubble.enabled=true --set hubble.relay.enabled=true --set hubble.ui.enabled=true
 ```
 
 ### Entra ID (Azure AD)

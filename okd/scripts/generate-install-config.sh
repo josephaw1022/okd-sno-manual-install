@@ -42,7 +42,7 @@ networking:
     hostPrefix: 20
   machineNetwork:
   - cidr: $MACHINE_NETWORK_CIDR
-  networkType: Cilium
+  networkType: None
   serviceNetwork:
   - 172.30.0.0/16
 platform:

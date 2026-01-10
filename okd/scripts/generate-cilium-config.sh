@@ -22,33 +22,52 @@ metadata:
   name: cilium
   namespace: cilium
 spec:
-  kubeProxyReplacement: "true"
+  sessionAffinity: true
+  securityContext:
+    privileged: true
+  kubeProxyReplacement: strict
   k8sServiceHost: ${API_HOST}
-  k8sServicePort: "6443"
+  k8sServicePort: 6443
   ipam:
     mode: "cluster-pool"
     operator:
       clusterPoolIPv4PodCIDRList: "10.128.0.0/14"
-      clusterPoolIPv4MaskSize: 23
+      clusterPoolIPv4MaskSize: 20
   cni:
     binPath: "/var/lib/cni/bin"
     confPath: "/var/run/multus/cni/net.d"
     exclusive: false
-  nodeinit:
-    enabled: true
-  securityContext:
-    privileged: true
-  sessionAffinity: true
+    customConf: false
   prometheus:
     enabled: true
-    serviceMonitor: {enabled: false}
+    serviceMonitor: {enabled: true}
+  nodeinit:
+    enabled: true
+  extraConfig:
+    bpf-lb-sock-hostns-only: "true"
+    export-aggregation: "connection"
+    export-aggregation-ignore-source-port: "false"
+    export-aggregation-state-filter: "new closed established error"
   hubble:
     enabled: true
-    tls: {enabled: false}
+    metrics:
+      enabled:
+      - dns:labelsContext=source_namespace,destination_namespace
+      - drop:labelsContext=source_namespace,destination_namespace
+      - tcp:labelsContext=source_namespace,destination_namespace
+      - icmp:labelsContext=source_namespace,destination_namespace
+      - port-distribution
+      - flow:labelsContext=source_namespace,destination_namespace;sourceContext=workload-name|reserved-identity;destinationContext=workload-name|reserved-identity
+      serviceMonitor: {enabled: true}
     relay: {enabled: true}
   operator:
     unmanagedPodWatcher:
       restart: false
+    metrics:
+      enabled: true
+    prometheus:
+      enabled: true
+      serviceMonitor: {enabled: true}
 EOF
 
 echo "✅ CiliumConfig generated: ${OUTPUT_FILE}"

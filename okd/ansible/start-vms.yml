@@ -1,0 +1,46 @@
+---
+# Ansible playbook to start all stopped VMs on libvirt host
+# Usage: ansible-playbook -i inventory.yml start-vms.yml
+
+- name: Start all stopped VMs on libvirt host
+  hosts: libvirt_hosts
+  gather_facts: false
+
+  tasks:
+    - name: Get list of all VMs
+      ansible.builtin.command:
+        cmd: virsh list --all --name
+      register: all_vms
+      changed_when: false
+
+    - name: Get list of running VMs
+      ansible.builtin.command:
+        cmd: virsh list --state-running --name
+      register: running_vms
+      changed_when: false
+
+    - name: Calculate stopped VMs
+      ansible.builtin.set_fact:
+        stopped_vms: "{{ all_vms.stdout_lines | difference(running_vms.stdout_lines) | select() | list }}"
+
+    - name: Display stopped VMs
+      ansible.builtin.debug:
+        msg: "Found {{ stopped_vms | length }} stopped VM(s): {{ stopped_vms | join(', ') }}"
+      when: stopped_vms | length > 0
+
+    - name: Display message when no stopped VMs
+      ansible.builtin.debug:
+        msg: "No stopped VMs found. All VMs are already running."
+      when: stopped_vms | length == 0
+
+    - name: Start stopped VMs
+      ansible.builtin.command:
+        cmd: virsh start {{ item }}
+      loop: "{{ stopped_vms }}"
+      when: stopped_vms | length > 0
+      register: start_results
+
+    - name: Display start results
+      ansible.builtin.debug:
+        msg: "Successfully started {{ stopped_vms | length }} VM(s)"
+      when: stopped_vms | length > 0
