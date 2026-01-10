@@ -182,34 +182,47 @@ make create-vms
 
 This creates 3 master VMs, all booting from the same agent ISO. The first node (master-0) is the "rendezvous" host that coordinates the installation.
 
-### Step 7: Wait for Nodes to Boot and Install Cilium CNI
+### Step 7: Wait for Nodes to Boot
 
 After running `make create-vms`, the VMs will boot and begin the agent-based installation process. However, since we use `networkType: None` in the install config, the cluster won't have a CNI and pods won't be able to communicate.
 
 **Important:** The bootstrap process will stall until you install Cilium CNI.
 
-1. **Wait for the 2 non-rendezvous master nodes to shut down** - After initial boot, master-1 and master-2 will install CoreOS and then power off.
+Wait for the 2 non-rendezvous master nodes (master-1 and master-2) to shut down - after initial boot, they will install CoreOS and then power off.
 
-2. **Start all VMs:**
-   ```bash
-   make start-vms
-   ```
+### Step 8: Start All VMs
 
-3. **Install Cilium CNI** - This is required for the bootstrap to proceed:
-   ```bash
-   make install-cilium
-   ```
-   
-   This installs Cilium with the correct CNI paths for OKD (`/etc/kubernetes/cni/net.d`). After Cilium is installed, the pods on the bootstrap/rendezvous node will be able to communicate with pods on the other master nodes.
+```bash
+make start-vms
+```
 
-4. **Verify Cilium is running:**
-   ```bash
-   cilium status
-   ```
-   
-   You should see all components showing `OK` and nodes becoming `Ready`.
+### Step 9: Set Up Kubeconfig
 
-### Step 8: Monitor Installation
+This is required so the Cilium CLI can communicate with the cluster:
+
+```bash
+make use-kubeconfig
+```
+
+### Step 10: Install Cilium CNI
+
+This is required for the bootstrap to proceed:
+
+```bash
+make install-cilium
+```
+
+This installs Cilium with the correct CNI paths for OKD (`/etc/kubernetes/cni/net.d`). After Cilium is installed, the pods on the bootstrap/rendezvous node will be able to communicate with pods on the other master nodes.
+
+### Step 11: Verify Cilium is Running
+
+```bash
+cilium status
+```
+
+You should see all components showing `OK` and nodes becoming `Ready`.
+
+### Step 12: Monitor Installation
 
 ```bash
 # Wait for install to complete
@@ -219,7 +232,7 @@ make wait-install
 make watch-bootstrap
 ```
 
-### Step 9: Access the Cluster
+### Step 13: Access the Cluster
 
 ```bash
 make use-kubeconfig
