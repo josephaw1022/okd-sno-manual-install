@@ -90,7 +90,7 @@
             --os-variant fedora-coreos-stable \
             --graphics vnc,listen=0.0.0.0 \
             --noautoconsole \
-            --boot hd,cdrom
+            --boot cdrom,hd
       loop: "{{ master_exists.results }}"
       when: item.rc != 0
 
