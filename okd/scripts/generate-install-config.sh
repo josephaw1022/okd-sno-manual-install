@@ -42,7 +42,7 @@ networking:
     hostPrefix: 20
   machineNetwork:
   - cidr: $MACHINE_NETWORK_CIDR
-  networkType: OVNKubernetes
+  networkType: Cilium
   serviceNetwork:
   - 172.30.0.0/16
 platform:

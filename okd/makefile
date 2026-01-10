@@ -24,6 +24,11 @@ VM_DISK_SIZE ?= 120
 SERVER_HOST ?= 192.168.1.100
 SERVER_USER ?= root
 
+# Cilium CNI settings
+CILIUM_VERSION ?= 1.15.1
+CILIUM_OLM_REPO ?= https://github.com/isovalent/olm-for-cilium.git
+CILIUM_TMP_DIR ?= /tmp/cilium-olm
+
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
 
@@ -78,8 +83,49 @@ agent-iso: ## Generate the agent-based installer ISO (single ISO for all nodes).
 	mkdir -p cluster
 	cp install-config.yaml cluster/
 	cp agent-config.yaml cluster/
+	@if [ -d cluster/openshift ] && [ "$$(ls -A cluster/openshift 2>/dev/null)" ]; then \
+		echo "📋 Using custom manifests from cluster/openshift/"; \
+	fi
 	openshift-install --dir=cluster agent create image
 	@echo "✅ Agent ISO created: cluster/agent.x86_64.iso"
+
+
+.PHONY: create-manifests
+create-manifests: ## Create the manifests directory structure for custom manifests.
+	@echo "📁 Creating manifests directory structure..."
+	mkdir -p cluster/openshift
+	@echo "✅ Manifests directory created: cluster/openshift/"
+
+
+.PHONY: download-cilium-manifests
+download-cilium-manifests: ## Download Cilium OLM manifests from GitHub.
+	@echo "⬇️ Downloading Cilium v$(CILIUM_VERSION) manifests..."
+	@rm -rf $(CILIUM_TMP_DIR)
+	git clone --depth 1 $(CILIUM_OLM_REPO) $(CILIUM_TMP_DIR)
+	@echo "✅ Cilium OLM repo cloned to $(CILIUM_TMP_DIR)"
+
+
+.PHONY: copy-cilium-manifests
+copy-cilium-manifests: create-manifests download-cilium-manifests ## Download and copy Cilium manifests to cluster/openshift/.
+	@echo "📋 Copying Cilium v$(CILIUM_VERSION) manifests..."
+	@if [ ! -d "$(CILIUM_TMP_DIR)/manifests/cilium.v$(CILIUM_VERSION)" ]; then \
+		echo "❌ Cilium version $(CILIUM_VERSION) not found in $(CILIUM_TMP_DIR)/manifests/"; \
+		echo "Available versions:"; \
+		ls $(CILIUM_TMP_DIR)/manifests/ | grep cilium.v; \
+		exit 1; \
+	fi
+	cp -v $(CILIUM_TMP_DIR)/manifests/cilium.v$(CILIUM_VERSION)/* cluster/openshift/
+	@echo "✅ Cilium manifests copied to cluster/openshift/"
+	@echo ""
+	@echo "📝 You can customize cluster/openshift/cluster-network-07-cilium-ciliumconfig.yaml"
+	@echo "   to configure Hubble, metrics, and other Cilium options."
+
+
+.PHONY: clean-cilium-tmp
+clean-cilium-tmp: ## Clean up temporary Cilium OLM directory.
+	@echo "🧹 Cleaning up Cilium temp directory..."
+	rm -rf $(CILIUM_TMP_DIR)
+	@echo "✅ Cleaned $(CILIUM_TMP_DIR)"
 
 
 .PHONY: format-files
@@ -99,10 +145,12 @@ clean: ## Clean up generated files.
 
 
 .PHONY: build
-build: ## Build the agent-based installer ISO for 3-node cluster.
-	@echo "🔨 Building the OKD 3-Node Agent Installer ISO..."
+build: ## Build the agent-based installer ISO for 3-node cluster with Cilium CNI.
+	@echo "🔨 Building the OKD 3-Node Agent Installer ISO with Cilium CNI..."
 	@$(MAKE) config
+	@$(MAKE) copy-cilium-manifests
 	@$(MAKE) agent-iso
+	@$(MAKE) clean-cilium-tmp
 	@echo ""
 	@echo "✅ ISO ready: cluster/agent.x86_64.iso"
 	@echo "📋 Copy this ISO to your libvirt server and boot all 3 VMs from it"

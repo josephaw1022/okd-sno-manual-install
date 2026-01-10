@@ -2,13 +2,19 @@
 
 This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 server using libvirt/KVM and the **agent-based installer**. This approach uses a single ISO for all nodes - no separate bootstrap VM required.
 
+**Features:**
+- **Cilium CNI** - Uses Cilium as the Container Network Interface instead of OVNKubernetes
+- Agent-based installation (single ISO for all nodes)
+- Automated VM provisioning via Ansible
+
 **Target Environment:**
 - CentOS Stream 10 server with 125GB RAM, 13 CPUs
 - VMs created via libvirt/virt-manager
 - Network: 192.168.0.0/21 (private router network)
 
 **Reference:**
-[OKD Installation on Any Platform](https://docs.okd.io/latest/installing/installing_platform_agnostic/installing-platform-agnostic.html)
+- [OKD Installation on Any Platform](https://docs.okd.io/latest/installing/installing_platform_agnostic/installing-platform-agnostic.html)
+- [Cilium OLM for OpenShift](https://github.com/isovalent/olm-for-cilium)
 
 
 
@@ -97,6 +103,9 @@ MASTER2_IP ?= 192.168.1.12
 # Gateway/DNS
 GATEWAY_IP ?= 192.168.1.1
 
+# Cilium CNI settings
+CILIUM_VERSION ?= 1.15.1
+
 # Libvirt VM settings
 VM_CPUS ?= 4
 VM_MEMORY ?= 41984
@@ -124,9 +133,17 @@ make build
 ```
 
 This will:
-1. Generate `install-config.yaml` for 3-node cluster
+1. Generate `install-config.yaml` for 3-node cluster (with `networkType: Cilium`)
 2. Generate `agent-config.yaml` with static IPs and MAC addresses
-3. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
+3. Download Cilium v1.15.1 manifests from [isovalent/olm-for-cilium](https://github.com/isovalent/olm-for-cilium)
+4. Copy Cilium manifests to `cluster/openshift/`
+5. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
+6. Clean up temporary Cilium files
+
+**To use a different Cilium version:**
+```bash
+make build CILIUM_VERSION=1.14.7
+```
 
 **Important:** The `agent-config.yaml` maps MAC addresses to IPs. Make sure the MAC addresses in the config match what you'll use in the VMs.
 
@@ -192,6 +209,21 @@ oc get co
 ---
 
 ## Post-Installation
+
+### Verify Cilium CNI
+
+After the cluster is up, verify Cilium is running:
+
+```bash
+oc get pods -n cilium
+oc get ciliumconfig -n cilium
+```
+
+To customize Cilium configuration (e.g., enable Hubble metrics):
+
+```bash
+oc edit ciliumconfig -n cilium cilium
+```
 
 ### Entra ID (Azure AD)
 
