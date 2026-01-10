@@ -409,6 +409,8 @@ install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster 
 		--set hubble.enabled=true \
 		--set hubble.relay.enabled=true \
 		--set hubble.ui.enabled=true \
+		--set ingressController.enabled=true \
+		--set ingressController.loadbalancerMode=shared \
 		--wait=false
 	@echo "✅ Cilium installed - run 'cilium status' to verify"
 
