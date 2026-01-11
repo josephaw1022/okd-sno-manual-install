@@ -414,24 +414,20 @@ delete-kubelet-config: ## Delete kubelet config.
 .PHONY: fix-bootstrap
 fix-bootstrap: ## Create bootstrap configmap to unblock openshift-apiserver API registration.
 	@echo "🔧 Creating bootstrap configmap..."
-	@cat << 'EOF' | oc apply -f -
-	apiVersion: v1
-	kind: ConfigMap
-	metadata:
-	name: bootstrap
-	namespace: kube-system
-	data:
-	status: complete
-	EOF
+	@printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bootstrap\n  namespace: kube-system\ndata:\n  status: complete\n' | oc apply -f -
 	@echo "✅ Bootstrap configmap created - openshift-apiserver should now register Route API"
 
 
 .PHONY: install-cilium
 install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster (post-bootstrap).
 	@echo "🗑️ Removing existing Cilium workloads (if any)..."
-	-kubectl delete namespace cilium --ignore-not-found=true --wait=true 2>/dev/null || true
-	-kubectl delete clusterrolebinding cilium cilium-operator --ignore-not-found=true 2>/dev/null || true
-	-kubectl delete clusterrole cilium cilium-operator --ignore-not-found=true 2>/dev/null || true
+	-kubectl delete -i=false namespace cilium cilium-secrets --ignore-not-found=true --wait=true 2>/dev/null || true
+	-@kubectl get clusterroles -o name 2>/dev/null | grep -E 'cilium|hubble' | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
+	-@kubectl get clusterrolebindings -o name 2>/dev/null | grep -E 'cilium|hubble' | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
+	-@kubectl get crd -o name 2>/dev/null | grep cilium | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
+	-@kubectl get ingressclass -o name 2>/dev/null | grep cilium | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
+	-@kubectl get gatewayclass -o name 2>/dev/null | grep cilium | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
+	-@kubectl get configmap -n kube-system cilium-config --ignore-not-found=true -o name 2>/dev/null | xargs -r kubectl delete -i=false -n kube-system --ignore-not-found=true 2>/dev/null || true
 	@echo "🌐 Installing Cilium $(CILIUM_VERSION) on OKD cluster..."
 	cilium install \
 		--version $(CILIUM_VERSION) \
