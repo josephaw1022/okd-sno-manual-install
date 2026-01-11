@@ -145,9 +145,10 @@ clean: ## Clean up generated files.
 
 
 .PHONY: build
-build: ## Build the agent-based installer ISO for 3-node cluster (no CNI - install post-bootstrap).
+build: ## Build the agent-based installer ISO for 3-node cluster with Cilium CNI manifests.
 	@echo "🔨 Building the OKD 3-Node Agent Installer ISO..."
 	@$(MAKE) config
+	@$(MAKE) generate-cilium-manifests
 	@$(MAKE) agent-iso
 	@echo ""
 	@echo "✅ ISO ready: cluster/agent.x86_64.iso"
@@ -324,6 +325,16 @@ start-vms: ## Start all stopped VMs on the libvirt server via Ansible.
 	@echo "📋 After nodes are ready, run 'make install-cilium' to add Cilium CNI so that the master nodes can communicate to the bootstrap node and the pods can communicate"
 
 
+.PHONY: reboot-non-bootstrap
+reboot-non-bootstrap: ## Reboot master-1 and master-2 (non-bootstrap nodes).
+	@echo "🔄 Rebooting non-bootstrap nodes (master-1 and master-2)..."
+	@pushd ansible > /dev/null && \
+	MASTER1_IP=$(MASTER1_IP) MASTER2_IP=$(MASTER2_IP) \
+	ansible-playbook -i inventory.yml reboot-non-bootstrap.yml && \
+	popd > /dev/null
+	@echo "✅ Non-bootstrap nodes rebooted"
+
+
 .PHONY: update-dns
 update-dns: ## Update Pi-hole DNS config for OKD cluster.
 	@echo "🌐 Updating Pi-hole DNS configuration..."
@@ -417,6 +428,10 @@ fix-bootstrap: ## Create bootstrap configmap to unblock openshift-apiserver API 
 
 .PHONY: install-cilium
 install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster (post-bootstrap).
+	@echo "🗑️ Removing existing Cilium workloads (if any)..."
+	-kubectl delete namespace cilium --ignore-not-found=true --wait=true 2>/dev/null || true
+	-kubectl delete clusterrolebinding cilium cilium-operator --ignore-not-found=true 2>/dev/null || true
+	-kubectl delete clusterrole cilium cilium-operator --ignore-not-found=true 2>/dev/null || true
 	@echo "🌐 Installing Cilium $(CILIUM_VERSION) on OKD cluster..."
 	cilium install \
 		--version $(CILIUM_VERSION) \
