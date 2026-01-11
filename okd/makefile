@@ -90,7 +90,6 @@ agent-iso: ## Generate the agent-based installer ISO (single ISO for all nodes).
 	openshift-install --dir=cluster agent create image
 	@echo "✅ Agent ISO created: cluster/agent.x86_64.iso"
 
-
 .PHONY: create-manifests
 create-manifests: ## Create the manifests directory structure for custom manifests.
 	@echo "📁 Creating manifests directory structure..."
@@ -141,7 +140,7 @@ format-files: ## Format all .ign and .json files in cluster/ using jq.
 clean: ## Clean up generated files.
 	@echo "🧹 Cleaning up..."
 	rm -f oc.tar.gz openshift-install.tar.gz oc openshift-install fcos-live.iso
-	rm -rf cluster/* install-config.yaml agent-config.yaml _rendered
+	rm -rf cluster install-config.yaml agent-config.yaml _rendered
 
 
 
@@ -156,6 +155,19 @@ build: ## Build the agent-based installer ISO for 3-node cluster (no CNI - insta
 	@echo "📋 Next step: make copy-iso"
 	@echo ""
 	@echo "⚠️  IMPORTANT: After cluster bootstrap, run 'make install-cilium' to install CNI"
+
+
+.PHONY: rebuild
+rebuild: ## Clean, rebuild ISO, copy to server, and create VMs (full redeploy).
+	@echo "🔄 Full rebuild and redeploy..."
+	@$(MAKE) clean
+	@$(MAKE) delete-iso
+	@$(MAKE) build
+	@$(MAKE) copy-iso
+	@$(MAKE) create-vms
+	@echo ""
+	@echo "✅ Rebuild complete! VMs are starting."
+	@echo "📋 Next: make watch-all (or make watch-bootstrap + make wait-install)"
 
 
 .PHONY: use-kubeconfig
@@ -388,6 +400,21 @@ delete-kubelet-config: ## Delete kubelet config.
 	@echo "✅ Kubelet config deleted"
 
 
+.PHONY: fix-bootstrap
+fix-bootstrap: ## Create bootstrap configmap to unblock openshift-apiserver API registration.
+	@echo "🔧 Creating bootstrap configmap..."
+	@cat << 'EOF' | oc apply -f -
+	apiVersion: v1
+	kind: ConfigMap
+	metadata:
+	name: bootstrap
+	namespace: kube-system
+	data:
+	status: complete
+	EOF
+	@echo "✅ Bootstrap configmap created - openshift-apiserver should now register Route API"
+
+
 .PHONY: install-cilium
 install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster (post-bootstrap).
 	@echo "🌐 Installing Cilium $(CILIUM_VERSION) on OKD cluster..."
@@ -411,6 +438,9 @@ install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster 
 		--set hubble.ui.enabled=true \
 		--set ingressController.enabled=true \
 		--set ingressController.loadbalancerMode=shared \
+		--set ingressController.enableProxyProtocol=true \
+		--set gatewayAPI.enabled=true \
+		--set gatewayAPI.enableProxyProtocol=true \
 		--wait=false
 	@echo "✅ Cilium installed - run 'cilium status' to verify"
 
