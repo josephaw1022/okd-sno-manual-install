@@ -30,35 +30,25 @@ helm template cilium cilium/cilium \
   --namespace cilium \
   --set cluster.name="${CLUSTER_NAME}" \
   --set cluster.id=1 \
-  --set kubeProxyReplacement=strict \
+  --set kubeProxyReplacement=true \
   --set k8sServiceHost="${API_HOST}" \
   --set k8sServicePort=6443 \
   --set ipam.mode=cluster-pool \
   --set ipam.operator.clusterPoolIPv4PodCIDRList="{10.128.0.0/14}" \
   --set ipam.operator.clusterPoolIPv4MaskSize=20 \
   --set cni.binPath=/var/lib/cni/bin \
-  --set cni.confPath=/var/run/multus/cni/net.d \
+  --set cni.confPath=/etc/kubernetes/cni/net.d \
   --set cni.exclusive=false \
-  --set cni.customConf=false \
   --set securityContext.privileged=true \
-  --set sessionAffinity=true \
-  --set prometheus.enabled=true \
-  --set prometheus.serviceMonitor.enabled=true \
-  --set prometheus.serviceMonitor.trustCRDsExist=true \
-  --set operator.prometheus.enabled=true \
-  --set operator.prometheus.serviceMonitor.enabled=true \
-  --set operator.prometheus.serviceMonitor.trustCRDsExist=true \
+  --set nodeinit.enabled=true \
   --set hubble.enabled=true \
   --set hubble.relay.enabled=true \
-  --set hubble.metrics.enabled="{dns:labelsContext=source_namespace\,destination_namespace,drop:labelsContext=source_namespace\,destination_namespace,tcp:labelsContext=source_namespace\,destination_namespace,icmp:labelsContext=source_namespace\,destination_namespace,port-distribution,flow:labelsContext=source_namespace\,destination_namespace;sourceContext=workload-name|reserved-identity;destinationContext=workload-name|reserved-identity}" \
-  --set hubble.metrics.serviceMonitor.enabled=true \
-  --set hubble.metrics.serviceMonitor.trustCRDsExist=true \
-  --set nodeinit.enabled=true \
-  --set bpf.lbExternalClusterIP=false \
-  --set bpf.lbSockHostnsOnly=true \
-  --set tunnel=disabled \
-  --set autoDirectNodeRoutes=true \
-  --set installNoConntrackIptablesRules=true \
+  --set hubble.ui.enabled=true \
+  --set ingressController.enabled=true \
+  --set ingressController.loadbalancerMode=shared \
+  --set ingressController.enableProxyProtocol=true \
+  --set gatewayAPI.enabled=true \
+  --set gatewayAPI.enableProxyProtocol=true \
   > "${OUTPUT_DIR}/cilium-combined.yaml"
 
 # Split the big manifest into numbered files for proper ordering
