@@ -1,0 +1,26 @@
+---
+# Reboot non-bootstrap nodes (master-1 and master-2) via libvirt
+# Uses virsh on the libvirt host to reboot the VMs
+
+- name: Reboot non-bootstrap OKD nodes via libvirt
+  hosts: libvirt_hosts
+  gather_facts: false
+
+  tasks:
+    - name: Reboot master-1 VM
+      ansible.builtin.command:
+        cmd: virsh reboot okd-master-1
+      register: master1_reboot
+      ignore_errors: true
+
+    - name: Reboot master-2 VM
+      ansible.builtin.command:
+        cmd: virsh reboot okd-master-2
+      register: master2_reboot
+      ignore_errors: true
+
+    - name: Display reboot status
+      ansible.builtin.debug:
+        msg:
+          - "master-1: {{ master1_reboot.stdout | default('Failed') }}"
+          - "master-2: {{ master2_reboot.stdout | default('Failed') }}"
