@@ -461,6 +461,13 @@ cilium-status: ## Check Cilium CNI status.
 	@cilium status
 
 
+.PHONY: fix-multus-cni
+fix-multus-cni: ## Fix multus CNI by symlinking Cilium config to multus autoconfig dir.
+	@echo "🔧 Fixing multus CNI configuration..."
+	@./cluster-setup/fix-multus-cni.sh
+	@echo "✅ Multus CNI fixed"
+
+
 .PHONY: uninstall-cilium
 uninstall-cilium: ## Uninstall Cilium CNI from cluster.
 	@echo "🗑️ Uninstalling Cilium..."
