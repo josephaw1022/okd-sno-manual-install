@@ -1,0 +1,184 @@
+---
+# Ansible playbook to install OKD GitOps (ArgoCD)
+# Usage: ansible-playbook -i inventory.yml install-gitops.yml
+#
+# Prerequisites:
+#   - OKDerators catalog installed (run setup-okderators.yml first)
+#   - Connected to OpenShift cluster (oc login)
+#
+# OKD GitOps provides ArgoCD for GitOps-based application deployment
+
+- name: Install OKD GitOps (ArgoCD)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    gitops_namespace: openshift-gitops-operator
+    gitops_channel: "{{ lookup('env', 'GITOPS_CHANNEL') | default('alpha', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create openshift-gitops-operator namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ gitops_namespace }}"
+
+    - name: Create OperatorGroup for GitOps
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: openshift-gitops-operator
+            namespace: "{{ gitops_namespace }}"
+          spec: {}
+
+    - name: Create GitOps Operator Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: gitops-operator
+            namespace: "{{ gitops_namespace }}"
+          spec:
+            channel: "{{ gitops_channel }}"
+            installPlanApproval: Automatic
+            name: gitops-operator
+            source: okderators
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for GitOps operator to be installed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ gitops_namespace }}"
+        label_selectors:
+          - "operators.coreos.com/gitops-operator.openshift-gitops-operator"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources[0].status is defined and
+        csv_status.resources[0].status.phase == 'Succeeded'
+      retries: 60
+      delay: 10
+      failed_when: false
+
+    - name: Check GitOps operator installation status
+      ansible.builtin.debug:
+        msg: >-
+          GitOps Operator status: {{ csv_status.resources[0].status.phase | default('Installing...') }}
+      when: csv_status.resources | length > 0
+
+    - name: Wait for openshift-gitops namespace to be created
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-gitops
+      register: gitops_ns
+      until: gitops_ns.resources | length > 0
+      retries: 30
+      delay: 10
+      failed_when: false
+
+    - name: Create openshift-gitops namespace if not exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: openshift-gitops
+      when: gitops_ns.resources | length == 0
+
+    - name: Wait for ArgoCD CRD to be available
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: argocds.argoproj.io
+      register: argocd_crd
+      until: argocd_crd.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: Create ArgoCD instance
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: argoproj.io/v1beta1
+          kind: ArgoCD
+          metadata:
+            name: openshift-gitops
+            namespace: openshift-gitops
+          spec:
+            server:
+              route:
+                enabled: true
+
+    - name: Wait for ArgoCD server to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: openshift-gitops-server
+        namespace: openshift-gitops
+      register: argocd_server
+      until: >
+        argocd_server.resources | length > 0 and
+        argocd_server.resources[0].status is defined and
+        argocd_server.resources[0].status.readyReplicas is defined and
+        argocd_server.resources[0].status.readyReplicas >= 1
+      retries: 60
+      delay: 10
+      failed_when: false
+
+    - name: Get ArgoCD admin password
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: openshift-gitops-cluster
+        namespace: openshift-gitops
+      register: argocd_secret
+      failed_when: false
+
+    - name: Get ArgoCD Route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: openshift-gitops-server
+        namespace: openshift-gitops
+      register: argocd_route
+      failed_when: false
+
+    - name: Display ArgoCD access information
+      ansible.builtin.debug:
+        msg:
+          - "✅ OKD GitOps (ArgoCD) installed successfully!"
+          - ""
+          - "🌐 ArgoCD URL: https://{{ argocd_route.resources[0].spec.host | default('openshift-gitops-server-openshift-gitops.apps.<cluster>') }}"
+          - "👤 Username: admin"
+          - "🔑 Password: {{ argocd_secret.resources[0].data['admin.password'] | b64decode | default('(retrieve from secret openshift-gitops-cluster)') }}"
+          - ""
+          - "📋 To get the admin password manually:"
+          - "   oc get secret openshift-gitops-cluster -n openshift-gitops -o jsonpath='{.data.admin\\.password}' | base64 -d"
+      when: argocd_secret.resources | length > 0

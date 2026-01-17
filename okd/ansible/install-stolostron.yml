@@ -1,0 +1,151 @@
+---
+# Ansible playbook to install Stolostron (Open Cluster Management)
+# Usage: ansible-playbook -i inventory.yml install-stolostron.yml
+#
+# Prerequisites:
+#   - OKDerators catalog installed (run setup-okderators.yml first)
+#   - Connected to OpenShift cluster (oc login)
+#
+# Stolostron (upstream of Red Hat Advanced Cluster Management) provides
+# multi-cluster management capabilities for Kubernetes/OpenShift clusters
+
+- name: Install Stolostron (Open Cluster Management)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    stolostron_namespace: open-cluster-management
+    stolostron_channel: "{{ lookup('env', 'STOLOSTRON_CHANNEL') | default('community-0.8', true) }}"
+    # Note: stolostron is in community-operators, not okderators
+    stolostron_source: "{{ lookup('env', 'STOLOSTRON_SOURCE') | default('community-operators', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create open-cluster-management namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ stolostron_namespace }}"
+
+    - name: Create OperatorGroup for Stolostron
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: open-cluster-management
+            namespace: "{{ stolostron_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ stolostron_namespace }}"
+
+    - name: Create Stolostron (ACM) Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: stolostron
+            namespace: "{{ stolostron_namespace }}"
+          spec:
+            channel: "{{ stolostron_channel }}"
+            installPlanApproval: Automatic
+            name: stolostron
+            source: "{{ stolostron_source }}"
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for ACM operator to be installed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ stolostron_namespace }}"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources | selectattr('status.phase', 'defined') | selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+      retries: 90
+      delay: 10
+      failed_when: false
+
+    - name: Check ACM operator installation status
+      ansible.builtin.debug:
+        msg: "ACM Operator CSVs found: {{ csv_status.resources | length }}"
+      when: csv_status.resources | length > 0
+
+    - name: Create MultiClusterHub instance
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operator.open-cluster-management.io/v1
+          kind: MultiClusterHub
+          metadata:
+            name: multiclusterhub
+            namespace: "{{ stolostron_namespace }}"
+          spec: {}
+
+    - name: Wait for MultiClusterHub to be ready
+      kubernetes.core.k8s_info:
+        api_version: operator.open-cluster-management.io/v1
+        kind: MultiClusterHub
+        name: multiclusterhub
+        namespace: "{{ stolostron_namespace }}"
+      register: mch_status
+      until: >
+        mch_status.resources | length > 0 and
+        mch_status.resources[0].status is defined and
+        mch_status.resources[0].status.phase is defined and
+        mch_status.resources[0].status.phase == 'Running'
+      retries: 120
+      delay: 15
+      failed_when: false
+
+    - name: Check MultiClusterHub status
+      ansible.builtin.debug:
+        msg: >-
+          MultiClusterHub status: {{ mch_status.resources[0].status.phase | default('Installing...') }}
+      when: mch_status.resources | length > 0
+
+    - name: Get ACM Console Route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: multicloud-console
+        namespace: "{{ stolostron_namespace }}"
+      register: acm_route
+      failed_when: false
+
+    - name: Display Stolostron access information
+      ansible.builtin.debug:
+        msg:
+          - "✅ Stolostron (Open Cluster Management) installed!"
+          - ""
+          - "🌐 ACM Console: https://{{ acm_route.resources[0].spec.host | default('multicloud-console-open-cluster-management.apps.<cluster>') }}"
+          - ""
+          - "📋 Note: MultiClusterHub takes several minutes to fully deploy all components."
+          - "   Monitor progress with: oc get multiclusterhub -n open-cluster-management"
+          - ""
+          - "📋 To import a cluster:"
+          - "   1. Go to Infrastructure -> Clusters in the ACM console"
+          - "   2. Click 'Import cluster'"
+          - "   3. Follow the import wizard"

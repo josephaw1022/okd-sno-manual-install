@@ -1,0 +1,192 @@
+---
+# Ansible playbook to install Local Storage Operator with hostpath provisioner
+# Usage: ansible-playbook -i inventory.yml install-local-storage.yml
+#
+# Prerequisites:
+#   - OKDerators catalog installed (run setup-okderators.yml first)
+#   - Connected to OpenShift cluster (oc login)
+#
+# This creates a simple hostpath-based storage class for development/testing.
+# For production, consider using dedicated disks with LocalVolume resources.
+
+- name: Install Local Storage Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    lso_namespace: openshift-local-storage
+    lso_channel: "{{ lookup('env', 'LSO_CHANNEL') | default('alpha', true) }}"
+    # Path on nodes for hostpath volumes
+    hostpath_dir: "{{ lookup('env', 'HOSTPATH_DIR') | default('/var/local-storage', true) }}"
+    # Set storage class as default
+    set_default_sc: "{{ lookup('env', 'SET_DEFAULT_SC') | default('true', true) | bool }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create openshift-local-storage namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ lso_namespace }}"
+
+    - name: Create OperatorGroup for Local Storage
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: local-storage-operatorgroup
+            namespace: "{{ lso_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ lso_namespace }}"
+
+    - name: Create Local Storage Operator Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: local-storage-operator
+            namespace: "{{ lso_namespace }}"
+          spec:
+            channel: "{{ lso_channel }}"
+            installPlanApproval: Automatic
+            name: local-storage-operator
+            source: okderators
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for Local Storage operator to be installed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ lso_namespace }}"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources | selectattr('metadata.name', 'search', 'local-storage-operator') | selectattr('status.phase', 'defined') | selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+      retries: 60
+      delay: 10
+
+    - name: Check Local Storage operator installation status
+      ansible.builtin.debug:
+        msg: "Local Storage Operator installed: {{ csv_status.resources | map(attribute='metadata.name') | list }}"
+
+    # Create MachineConfig to setup hostpath directory on all nodes
+    - name: Create MachineConfig for master nodes hostpath directory
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: machineconfiguration.openshift.io/v1
+          kind: MachineConfig
+          metadata:
+            name: 50-local-storage-hostpath-master
+            labels:
+              machineconfiguration.openshift.io/role: master
+          spec:
+            config:
+              ignition:
+                version: 3.2.0
+              systemd:
+                units:
+                  - name: local-storage-hostpath.service
+                    enabled: true
+                    contents: |
+                      [Unit]
+                      Description=Create local storage hostpath directory
+                      Before=kubelet.service
+                      
+                      [Service]
+                      Type=oneshot
+                      ExecStart=/bin/mkdir -p {{ hostpath_dir }}
+                      ExecStart=/bin/chmod 777 {{ hostpath_dir }}
+                      ExecStart=/bin/chcon -Rt container_file_t {{ hostpath_dir }}
+                      RemainAfterExit=yes
+                      
+                      [Install]
+                      WantedBy=multi-user.target
+
+    # Create a hostpath StorageClass using the KubeVirt hostpath provisioner
+    # Reference: https://okd.io/docs/project/guides/virt-baremetal-upi/
+    - name: Create hostpath StorageClass
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: local-storage
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "{{ set_default_sc | string | lower }}"
+          provisioner: kubevirt.io/hostpath-provisioner
+          volumeBindingMode: WaitForFirstConsumer
+          reclaimPolicy: Delete
+
+    - name: Display installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Local Storage Operator installed!"
+          - ""
+          - "📋 Storage Class 'local-storage' created (default: {{ set_default_sc }})"
+          - ""
+          - "⚠️  Note: MachineConfig will cause nodes to reboot to create {{ hostpath_dir }}"
+          - ""
+          - "📋 For dynamic provisioning, create PersistentVolumes manually:"
+          - ""
+          - "   apiVersion: v1"
+          - "   kind: PersistentVolume"
+          - "   metadata:"
+          - "     name: local-pv-1"
+          - "   spec:"
+          - "     capacity:"
+          - "       storage: 10Gi"
+          - "     accessModes:"
+          - "       - ReadWriteOnce"
+          - "     persistentVolumeReclaimPolicy: Delete"
+          - "     storageClassName: local-storage"
+          - "     local:"
+          - "       path: {{ hostpath_dir }}/pv1"
+          - "     nodeAffinity:"
+          - "       required:"
+          - "         nodeSelectorTerms:"
+          - "           - matchExpressions:"
+          - "               - key: kubernetes.io/hostname"
+          - "                 operator: In"
+          - "                 values:"
+          - "                   - <node-name>"
+          - ""
+          - "📋 Or use LocalVolumeDiscovery to auto-discover disks:"
+          - "   oc apply -f - <<EOF"
+          - "   apiVersion: local.storage.openshift.io/v1alpha1"
+          - "   kind: LocalVolumeDiscovery"
+          - "   metadata:"
+          - "     name: auto-discover-devices"
+          - "     namespace: openshift-local-storage"
+          - "   spec:"
+          - "     nodeSelector:"
+          - "       nodeSelectorTerms:"
+          - "         - matchExpressions:"
+          - "             - key: kubernetes.io/hostname"
+          - "               operator: Exists"
+          - "   EOF"

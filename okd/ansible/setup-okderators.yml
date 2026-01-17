@@ -1,0 +1,64 @@
+---
+# Ansible playbook to setup OKDerators catalog on OKD cluster
+# Usage: ansible-playbook -i inventory.yml setup-okderators.yml
+#
+# This installs the OKDerators catalog source which provides community operators
+# specifically packaged for OKD.
+
+- name: Setup OKDerators catalog on OKD cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Install OKDerators catalog via official script
+      ansible.builtin.shell: |
+        curl -s https://raw.githubusercontent.com/okd-project/okderators-catalog-index/refs/heads/release-4.19/hack/install-catalog.sh | bash
+      args:
+        executable: /bin/bash
+      register: okderators_install
+      changed_when: "'created' in okderators_install.stdout or 'configured' in okderators_install.stdout"
+
+    - name: Display installation output
+      ansible.builtin.debug:
+        var: okderators_install.stdout_lines
+
+    - name: Wait for OKDerators catalog source to be ready
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+        name: okderators
+        namespace: openshift-marketplace
+      register: catalog_status
+      until: >
+        catalog_status.resources | length > 0 and
+        catalog_status.resources[0].status is defined and
+        catalog_status.resources[0].status.connectionState is defined and
+        catalog_status.resources[0].status.connectionState.lastObservedState == 'READY'
+      retries: 30
+      delay: 10
+      failed_when: false
+
+    - name: Report catalog status
+      ansible.builtin.debug:
+        msg: >-
+          OKDerators catalog source status: 
+          {{ catalog_status.resources[0].status.connectionState.lastObservedState | default('UNKNOWN') }}
+      when: catalog_status.resources | length > 0

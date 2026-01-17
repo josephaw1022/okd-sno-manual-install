@@ -1,0 +1,228 @@
+---
+# Ansible playbook to install KubeVirt (OKD Virtualization)
+# Usage: ansible-playbook -i inventory.yml install-kubevirt.yml
+#
+# Prerequisites:
+#   - OKDerators catalog installed (run setup-okderators.yml first)
+#   - Connected to OpenShift cluster (oc login)
+#   - Hardware virtualization enabled on nodes (nested virt or bare metal)
+#
+# Reference: https://okd.io/docs/project/guides/virt-baremetal-upi/
+#
+# This installs the KubeVirt HyperConverged Cluster Operator which provides
+# the ability to run virtual machines alongside containers on OKD
+
+- name: Install KubeVirt (OKD Virtualization)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    kubevirt_namespace: kubevirt-hyperconverged
+    kubevirt_channel: "{{ lookup('env', 'KUBEVIRT_CHANNEL') | default('stable', true) }}"
+    # Set to true to configure hostpath provisioner for local storage
+    setup_hostpath_provisioner: "{{ lookup('env', 'SETUP_HPP') | default('false', true) | bool }}"
+    hpp_path: "{{ lookup('env', 'HPP_PATH') | default('/var/hpvolumes', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create kubevirt-hyperconverged namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ kubevirt_namespace }}"
+
+    - name: Create OperatorGroup for KubeVirt (AllNamespaces mode)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: kubevirt-hyperconverged-group
+            namespace: "{{ kubevirt_namespace }}"
+          spec: {}
+
+    - name: Create KubeVirt HyperConverged Operator Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: community-kubevirt-hyperconverged
+            namespace: "{{ kubevirt_namespace }}"
+          spec:
+            channel: "{{ kubevirt_channel }}"
+            installPlanApproval: Automatic
+            name: community-kubevirt-hyperconverged
+            source: community-operators
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for HCO operator to be installed (CSV Succeeded)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ kubevirt_namespace }}"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources | selectattr('metadata.name', 'search', 'kubevirt-hyperconverged-operator') | selectattr('status.phase', 'defined') | selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+      retries: 90
+      delay: 10
+
+    - name: Check HCO operator installation status
+      ansible.builtin.debug:
+        msg: "HCO Operator CSVs installed: {{ csv_status.resources | map(attribute='metadata.name') | list }}"
+      when: csv_status.resources | length > 0
+
+    - name: Create HyperConverged instance
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: hco.kubevirt.io/v1beta1
+          kind: HyperConverged
+          metadata:
+            name: kubevirt-hyperconverged
+            namespace: "{{ kubevirt_namespace }}"
+          spec:
+            # Use emulation if hardware virtualization is not available (for nested virt/testing)
+            # Remove or set to false for bare metal with real virtualization support
+            featureGates:
+              withHostPassthroughCPU: true
+
+    - name: Wait for HyperConverged to be ready
+      kubernetes.core.k8s_info:
+        api_version: hco.kubevirt.io/v1beta1
+        kind: HyperConverged
+        name: kubevirt-hyperconverged
+        namespace: "{{ kubevirt_namespace }}"
+      register: hco_status
+      until: >
+        hco_status.resources | length > 0 and
+        hco_status.resources[0].status is defined and
+        hco_status.resources[0].status.conditions is defined and
+        hco_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+      retries: 120
+      delay: 15
+
+    - name: Check HyperConverged conditions
+      ansible.builtin.debug:
+        msg: >-
+          HyperConverged conditions: {{ hco_status.resources[0].status.conditions | map(attribute='type') | list | default(['Waiting...']) }}
+      when: hco_status.resources | length > 0 and hco_status.resources[0].status is defined
+
+    # Optional: Setup HostPath Provisioner for local storage
+    # Reference: https://okd.io/docs/project/guides/virt-baremetal-upi/
+    # MachineConfig from: https://okd.io/assets/files/machineconfig-selinux-hpp-6f83333b86fd3663254b9383f70e6dab.yaml
+    - name: Setup HostPath Provisioner SELinux MachineConfig (optional)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: machineconfiguration.openshift.io/v1
+          kind: MachineConfig
+          metadata:
+            name: 50-set-selinux-for-hostpath-provisioner-master
+            labels:
+              machineconfiguration.openshift.io/role: master
+          spec:
+            config:
+              ignition:
+                version: 2.2.0
+              systemd:
+                units:
+                  - name: hostpath-provisioner.service
+                    enabled: true
+                    contents: |
+                      [Unit]
+                      Description=Set SELinux chcon for hostpath provisioner
+                      Before=kubelet.service
+
+                      [Service]
+                      Type=oneshot
+                      RemainAfterExit=yes
+                      ExecStartPre=-mkdir -p {{ hpp_path }}
+                      ExecStart=/usr/bin/chcon -Rt container_file_t {{ hpp_path }}
+
+                      [Install]
+                      WantedBy=multi-user.target
+      when: setup_hostpath_provisioner
+
+    - name: Create HostPathProvisioner CR (optional)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: hostpathprovisioner.kubevirt.io/v1beta1
+          kind: HostPathProvisioner
+          metadata:
+            name: hostpath-provisioner
+          spec:
+            imagePullPolicy: IfNotPresent
+            pathConfig:
+              path: "{{ hpp_path }}"
+              useNamingPrefix: false
+      when: setup_hostpath_provisioner
+
+    - name: Create HostPath StorageClass (optional)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: hostpath-provisioner
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "false"
+          provisioner: kubevirt.io/hostpath-provisioner
+          reclaimPolicy: Delete
+          volumeBindingMode: WaitForFirstConsumer
+      when: setup_hostpath_provisioner
+
+    - name: Display KubeVirt installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ KubeVirt (OKD Virtualization) installed!"
+          - ""
+          - "📋 Components installed:"
+          - "   - KubeVirt HyperConverged Operator"
+          - "   - HyperConverged CR (kubevirt-hyperconverged)"
+          - "   - CDI (Containerized Data Importer)"
+          - "   - HostPath Provisioner Operator"
+          - ""
+          - "📋 To create a VM via CLI:"
+          - "   oc apply -f <vm-definition.yaml>"
+          - ""
+          - "📋 To create a VM via Console:"
+          - "   Virtualization -> VirtualMachines -> Create"
+          - ""
+          - "📋 To check KubeVirt status:"
+          - "   oc get kubevirt -n kubevirt-hyperconverged"
+          - "   oc get hyperconverged -n kubevirt-hyperconverged"
+
+    - name: Display HostPath Provisioner info
+      ansible.builtin.debug:
+        msg:
+          - "📦 HostPath Provisioner configured:"
+          - "   - Path: {{ hpp_path }}"
+          - "   - StorageClass: hostpath-provisioner"
+          - ""
+          - "⚠️  Note: Worker nodes will reboot to apply MachineConfig changes"
+      when: setup_hostpath_provisioner

@@ -1,0 +1,110 @@
+---
+# Ansible playbook to install OKD Data Foundation (ODF)
+# Usage: ansible-playbook -i inventory.yml install-odf.yml
+#
+# Prerequisites:
+#   - OKDerators catalog installed (run setup-okderators.yml first)
+#   - Connected to OpenShift cluster (oc login)
+#
+# ODF provides software-defined storage using Ceph/Rook for OKD clusters
+
+- name: Install OKD Data Foundation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    odf_namespace: openshift-storage
+    odf_channel: "{{ lookup('env', 'ODF_CHANNEL') | default('alpha', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create openshift-storage namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ odf_namespace }}"
+            labels:
+              openshift.io/cluster-monitoring: "true"
+
+    - name: Create OperatorGroup for ODF
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: openshift-storage-operatorgroup
+            namespace: "{{ odf_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ odf_namespace }}"
+
+    - name: Create ODF Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: odf-operator
+            namespace: "{{ odf_namespace }}"
+          spec:
+            channel: "{{ odf_channel }}"
+            installPlanApproval: Automatic
+            name: odf-operator
+            source: okderators
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for ODF operator to be installed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ odf_namespace }}"
+        label_selectors:
+          - "operators.coreos.com/odf-operator.openshift-storage"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources[0].status is defined and
+        csv_status.resources[0].status.phase == 'Succeeded'
+      retries: 60
+      delay: 10
+      failed_when: false
+
+    - name: Check ODF operator installation status
+      ansible.builtin.debug:
+        msg: >-
+          ODF Operator status: {{ csv_status.resources[0].status.phase | default('Installing...') }}
+      when: csv_status.resources | length > 0
+
+    - name: Display next steps
+      ansible.builtin.debug:
+        msg:
+          - "✅ ODF Operator subscription created"
+          - ""
+          - "📋 Next steps:"
+          - "   1. Wait for the operator to finish installing"
+          - "   2. Create a StorageSystem CR to configure your storage"
+          - "   3. For internal mode, ensure you have at least 3 nodes with available disks"
+          - ""
+          - "   Example StorageSystem can be created via the OKD Console:"
+          - "   Operators -> Installed Operators -> ODF -> Create StorageSystem"

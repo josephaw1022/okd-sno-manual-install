@@ -30,11 +30,15 @@ CILIUM_VERSION ?= 1.16.5
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
 
+##@ General
+
 .PHONY: help
 help: ## Show available Makefile commands.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} \
 	/^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } \
 	/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+
+##@ Setup & Dependencies
 
 .PHONY: deps
 deps: ## Install dependencies (podman, nmstate).
@@ -75,6 +79,7 @@ fcos: ## Download the FCOS ISO (for reference, agent-iso creates its own).
 	curl -L "$$ISO_URL" -o fcos-live.iso
 
 
+##@ ISO & Manifest Generation
 
 .PHONY: config
 config: ## Generate install-config.yaml and agent-config.yaml.
@@ -87,6 +92,28 @@ agent-iso: ## Generate the agent-based installer ISO (single ISO for all nodes).
 	mkdir -p cluster
 	cp install-config.yaml cluster/
 	cp agent-config.yaml cluster/
+	openshift-install --dir=cluster agent create image
+	@echo "✅ Agent ISO created: cluster/agent.x86_64.iso"
+
+
+.PHONY: cluster-manifests
+cluster-manifests: ## Generate cluster manifests for modification before ISO creation.
+	@echo "📋 Generating cluster manifests..."
+	mkdir -p cluster
+	cp install-config.yaml cluster/
+	cp agent-config.yaml cluster/
+	openshift-install --dir=cluster agent create cluster-manifests
+	@echo "✅ Manifests generated in cluster/cluster-manifests/"
+	@echo "📝 Modify manifests as needed, then run 'make agent-iso-from-manifests'"
+
+
+.PHONY: agent-iso-from-manifests
+agent-iso-from-manifests: ## Generate ISO from pre-existing/modified manifests (no manifest regeneration).
+	@echo "📦 Generating agent ISO from existing manifests..."
+	@if [ ! -d "cluster/cluster-manifests" ]; then \
+		echo "❌ No manifests found. Run 'make cluster-manifests' first."; \
+		exit 1; \
+	fi
 	openshift-install --dir=cluster agent create image
 	@echo "✅ Agent ISO created: cluster/agent.x86_64.iso"
 
@@ -135,6 +162,7 @@ format-files: ## Format all .ign and .json files in cluster/ using jq.
 	@echo "✅ Files formatted."
 
 
+##@ Build & Deploy
 
 .PHONY: clean
 clean: ## Clean up generated files.
@@ -158,6 +186,17 @@ build: ## Build the agent-based installer ISO for 3-node cluster with Cilium CNI
 	@echo "⚠️  IMPORTANT: After cluster bootstrap, run 'make install-cilium' to install CNI"
 
 
+.PHONY: build-with-manifest-edit
+build-with-manifest-edit: ## Build ISO with ability to edit default manifests before ISO creation.
+	@echo "🔨 Building OKD manifests for editing..."
+	@$(MAKE) config
+	@$(MAKE) cluster-manifests
+	@$(MAKE) generate-cilium-manifests
+	@echo "✅ Manifests ready for editing in cluster/cluster-manifests/"
+	@echo "📝 Edit manifests as needed, then run: make agent-iso-from-manifests"
+	@echo "📋 After ISO creation: make copy-iso && make create-vms"
+
+
 .PHONY: rebuild
 rebuild: ## Clean, rebuild ISO, copy to server, and create VMs (full redeploy).
 	@echo "🔄 Full rebuild and redeploy..."
@@ -170,6 +209,8 @@ rebuild: ## Clean, rebuild ISO, copy to server, and create VMs (full redeploy).
 	@echo "✅ Rebuild complete! VMs are starting."
 	@echo "📋 Next: make watch-all (or make watch-bootstrap + make wait-install)"
 
+
+##@ Cluster Access & Monitoring
 
 .PHONY: use-kubeconfig
 use-kubeconfig: ## Replace ~/.kube/config with cluster/auth/kubeconfig
@@ -253,8 +294,7 @@ approve-csrs: ## Approve pending CSRs for nodes.
 	@oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' | xargs -r oc adm certificate approve
 
 
-
-
+##@ Manifest Inspection
 
 .PHONY: extract-manifests
 extract-manifests: ## Extract manifests from the agent config (for inspection).
@@ -269,6 +309,8 @@ render-manifests: ## Render manifests using openshift-install (for inspection/cu
 	@echo "✅ Manifests rendered to _rendered/"
 	@echo "📝 Modify files in _rendered/cluster-manifests/ as needed"
 
+
+##@ VM Management (Libvirt)
 
 .PHONY: copy-iso
 copy-iso: ## Copy the agent ISO to the libvirt server via Ansible.
@@ -335,6 +377,8 @@ reboot-non-bootstrap: ## Reboot master-1 and master-2 (non-bootstrap nodes).
 	@echo "✅ Non-bootstrap nodes rebooted"
 
 
+##@ Infrastructure (DNS, Load Balancer)
+
 .PHONY: update-dns
 update-dns: ## Update Pi-hole DNS config for OKD cluster.
 	@echo "🌐 Updating Pi-hole DNS configuration..."
@@ -361,6 +405,8 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 	popd > /dev/null
 	@echo "✅ Load balancer destroyed"
 
+
+##@ Cluster Configuration
 
 .PHONY: setup-entraid
 setup-entraid: ## Configure Entra ID (Azure AD) OAuth for OKD cluster.
@@ -418,6 +464,8 @@ fix-bootstrap: ## Create bootstrap configmap to unblock openshift-apiserver API 
 	@echo "✅ Bootstrap configmap created - openshift-apiserver should now register Route API"
 
 
+##@ Cilium CNI
+
 .PHONY: install-cilium
 install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster (post-bootstrap).
 	@echo "🗑️ Removing existing Cilium workloads (if any)..."
@@ -473,3 +521,68 @@ uninstall-cilium: ## Uninstall Cilium CNI from cluster.
 	@echo "🗑️ Uninstalling Cilium..."
 	cilium uninstall --wait
 	@echo "✅ Cilium uninstalled"
+
+
+##@ Operators
+
+.PHONY: setup-okderators
+setup-okderators: ## Install OKDerators catalog source for community operators.
+	@echo "📦 Setting up OKDerators catalog..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml setup-okderators.yml && \
+	popd > /dev/null
+	@echo "✅ OKDerators catalog installed"
+
+
+.PHONY: install-odf
+install-odf: ## Install OKD Data Foundation (Ceph/Rook storage).
+	@echo "💾 Installing OKD Data Foundation..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-odf.yml && \
+	popd > /dev/null
+	@echo "✅ ODF operator installed"
+
+
+.PHONY: install-gitops
+install-gitops: ## Install OKD GitOps (ArgoCD).
+	@echo "🔄 Installing OKD GitOps..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-gitops.yml && \
+	popd > /dev/null
+	@echo "✅ GitOps installed"
+
+
+.PHONY: install-stolostron
+install-stolostron: ## Install Stolostron (Open Cluster Management / ACM).
+	@echo "🌐 Installing Stolostron (ACM)..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-stolostron.yml && \
+	popd > /dev/null
+	@echo "✅ Stolostron installed"
+
+
+.PHONY: install-kubevirt
+install-kubevirt: ## Install KubeVirt (OKD Virtualization).
+	@echo "🖥️ Installing KubeVirt..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-kubevirt.yml && \
+	popd > /dev/null
+	@echo "✅ KubeVirt installed"
+
+
+.PHONY: install-kubevirt-hpp
+install-kubevirt-hpp: ## Install KubeVirt with HostPath Provisioner for local storage.
+	@echo "🖥️ Installing KubeVirt with HostPath Provisioner..."
+	@pushd ansible > /dev/null && \
+	SETUP_HPP=true ansible-playbook -i inventory.yml install-kubevirt.yml && \
+	popd > /dev/null
+	@echo "✅ KubeVirt with HPP installed"
+
+
+.PHONY: install-local-storage
+install-local-storage: ## Install Local Storage Operator with hostpath storage class.
+	@echo "💾 Installing Local Storage Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-local-storage.yml && \
+	popd > /dev/null
+	@echo "✅ Local Storage Operator installed"
