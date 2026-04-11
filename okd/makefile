@@ -1,6 +1,6 @@
 # Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
-OKD_VERSION ?= 4.21.0-okd-scos.ec.13
+OKD_VERSION ?= 4.21.0-okd-scos.10
 ARCH ?= x86_64
 CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
