@@ -173,17 +173,15 @@ clean: ## Clean up generated files.
 
 
 .PHONY: build
-build: ## Build the agent-based installer ISO for 3-node cluster with Cilium CNI manifests.
+build: ## Build the agent-based installer ISO for 3-node cluster.
 	@echo "🔨 Building the OKD 3-Node Agent Installer ISO..."
 	@$(MAKE) config
-	@$(MAKE) generate-cilium-manifests
 	@$(MAKE) agent-iso
 	@echo ""
 	@echo "✅ ISO ready: cluster/agent.x86_64.iso"
 	@echo "📋 Optional: make delete-iso (to clean up old ISO on server)"
 	@echo "📋 Next step: make copy-iso"
 	@echo ""
-	@echo "⚠️  IMPORTANT: After cluster bootstrap, run 'make install-cilium' to install CNI"
 
 
 .PHONY: build-with-manifest-edit
@@ -191,7 +189,6 @@ build-with-manifest-edit: ## Build ISO with ability to edit default manifests be
 	@echo "🔨 Building OKD manifests for editing..."
 	@$(MAKE) config
 	@$(MAKE) cluster-manifests
-	@$(MAKE) generate-cilium-manifests
 	@echo "✅ Manifests ready for editing in cluster/cluster-manifests/"
 	@echo "📝 Edit manifests as needed, then run: make agent-iso-from-manifests"
 	@echo "📋 After ISO creation: make copy-iso && make create-vms"
