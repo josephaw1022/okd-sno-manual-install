@@ -1,0 +1,111 @@
+---
+# Ansible playbook to create PostgreSQL 15 container for AWX
+# Usage: ansible-playbook -i inventory.yml create-postgres.yml
+
+- name: Create PostgreSQL 15 container for AWX
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    pg_container_name: awx-postgres
+    pg_ip: 192.168.1.21
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_interface: eno1
+    macvlan_network_name: okd-lb-net
+    pg_volume_name: awx-postgres-data
+    pg_database: awx
+    pg_user: awx
+    pg_password: "{{ lookup('env', 'AWX_PG_PASSWORD') | default('awxpass', true) }}"
+
+  tasks:
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if volume exists
+      ansible.builtin.command:
+        cmd: sudo podman volume exists {{ pg_volume_name }}
+      register: volume_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create named volume for PostgreSQL data
+      ansible.builtin.command:
+        cmd: sudo podman volume create {{ pg_volume_name }}
+      when: volume_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ pg_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start PostgreSQL container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ pg_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ pg_ip }}
+          --restart always
+          -e POSTGRES_DB={{ pg_database }}
+          -e POSTGRES_USER={{ pg_user }}
+          -e POSTGRES_PASSWORD={{ pg_password }}
+          -v {{ pg_volume_name }}:/var/lib/postgresql/data:Z
+          docker.io/postgres:15
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ pg_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ pg_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 10
+      delay: 2
+      changed_when: false
+
+    - name: Wait for PostgreSQL to be ready
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} pg_isready -U {{ pg_user }} -d {{ pg_database }}
+      register: pg_ready
+      until: pg_ready.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "PostgreSQL 15 container created successfully!"
+          - ""
+          - "Container: {{ pg_container_name }}"
+          - "IP Address: {{ pg_ip }}"
+          - "Port: 5432"
+          - "Database: {{ pg_database }}"
+          - "User: {{ pg_user }}"
+          - "Password: {{ pg_password }}"
+          - "Volume: {{ pg_volume_name }}"
+          - ""
+          - "Connection string: postgresql://{{ pg_user }}:{{ pg_password }}@{{ pg_ip }}:5432/{{ pg_database }}"

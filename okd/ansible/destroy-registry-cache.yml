@@ -1,0 +1,46 @@
+---
+# Ansible playbook to destroy the pull-through cache registry
+# Usage: ansible-playbook -i inventory.yml destroy-registry-cache.yml
+
+- name: Destroy pull-through cache registry
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    registry_container_name: quay-cache
+    registry_volume_name: quay-cache-data
+    registry_config_dir: /opt/quay-cache
+
+  tasks:
+    - name: Stop registry container
+      ansible.builtin.command:
+        cmd: sudo podman stop {{ registry_container_name }}
+      register: stop_result
+      changed_when: stop_result.rc == 0
+      failed_when: false
+
+    - name: Remove registry container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ registry_container_name }}
+      register: rm_result
+      changed_when: rm_result.rc == 0
+      failed_when: false
+
+    - name: Remove registry volume
+      ansible.builtin.command:
+        cmd: sudo podman volume rm {{ registry_volume_name }}
+      register: vol_result
+      changed_when: vol_result.rc == 0
+      failed_when: false
+
+    - name: Remove registry config directory
+      ansible.builtin.file:
+        path: "{{ registry_config_dir }}"
+        state: absent
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "Pull-through cache registry destroyed!"
+          - "Container: {{ registry_container_name }} removed"
+          - "Volume: {{ registry_volume_name }} removed"
+          - "Config: {{ registry_config_dir }} removed"

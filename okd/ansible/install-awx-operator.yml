@@ -1,0 +1,123 @@
+---
+# Ansible playbook to install AWX Operator
+# Usage: ansible-playbook -i inventory.yml install-awx-operator.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# AWX is the open-source upstream project for Red Hat Ansible Automation Platform
+# This playbook installs the AWX Operator which manages AWX instances
+
+- name: Install AWX Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    awx_namespace: awx
+    awx_operator_version: "{{ lookup('env', 'AWX_OPERATOR_VERSION') | default('2.19.1', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create AWX namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ awx_namespace }}"
+
+    - name: Create OperatorGroup for AWX
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: awx-operator-group
+            namespace: "{{ awx_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ awx_namespace }}"
+
+    - name: Create AWX Operator Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: awx-operator
+            namespace: "{{ awx_namespace }}"
+          spec:
+            channel: fast
+            installPlanApproval: Automatic
+            name: awx-operator
+            source: community-operators
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for AWX operator to be installed (CSV Succeeded)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ awx_namespace }}"
+        label_selectors:
+          - "operators.coreos.com/awx-operator.awx"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources[0].status is defined and
+        csv_status.resources[0].status.phase == 'Succeeded'
+      retries: 60
+      delay: 10
+      failed_when: false
+
+    - name: Check AWX operator installation status
+      ansible.builtin.debug:
+        msg: >-
+          AWX Operator status: {{ csv_status.resources[0].status.phase | default('Installing...') }}
+      when: csv_status.resources | length > 0
+
+    - name: Wait for AWX operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ awx_namespace }}"
+        name: awx-operator-controller-manager
+      register: operator_deployment
+      until: >
+        operator_deployment.resources | length > 0 and
+        operator_deployment.resources[0].status is defined and
+        operator_deployment.resources[0].status.readyReplicas is defined and
+        operator_deployment.resources[0].status.readyReplicas >= 1
+      retries: 30
+      delay: 10
+      failed_when: false
+
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ AWX Operator installation complete!
+          
+          Operator Version: {{ awx_operator_version }}
+          Namespace: {{ awx_namespace }}
+          
+          Next steps:
+          1. Run 'make create-awx-instance' to create an AWX instance
+          2. Or create a custom AWX CR in the {{ awx_namespace }} namespace

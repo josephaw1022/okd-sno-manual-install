@@ -406,6 +406,24 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 	@echo "✅ Load balancer destroyed"
 
 
+.PHONY: create-registry-cache
+create-registry-cache: ## Create pull-through cache registry for Quay.io.
+	@echo "📦 Creating pull-through cache registry for Quay.io..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-registry-cache.yml && \
+	popd > /dev/null
+	@echo "✅ Registry cache created"
+
+
+.PHONY: destroy-registry-cache
+destroy-registry-cache: ## Destroy pull-through cache registry.
+	@echo "💥 Destroying registry cache..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-registry-cache.yml && \
+	popd > /dev/null
+	@echo "✅ Registry cache destroyed"
+
+
 ##@ Cluster Configuration
 
 .PHONY: setup-entraid
@@ -586,3 +604,30 @@ install-local-storage: ## Install Local Storage Operator with hostpath storage c
 	ansible-playbook -i inventory.yml install-local-storage.yml && \
 	popd > /dev/null
 	@echo "✅ Local Storage Operator installed"
+
+
+.PHONY: install-awx-operator
+install-awx-operator: ## Install AWX Operator for Ansible automation.
+	@echo "🤖 Installing AWX Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-awx-operator.yml && \
+	popd > /dev/null
+	@echo "✅ AWX Operator installed"
+
+
+.PHONY: create-awx-postgres
+create-awx-postgres: ## Create external PostgreSQL container for AWX.
+	@echo "🐘 Creating PostgreSQL container for AWX..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-postgres.yml && \
+	popd > /dev/null
+	@echo "✅ PostgreSQL container created"
+
+
+.PHONY: create-awx-instance
+create-awx-instance: ## Create an AWX instance for Ansible automation.
+	@echo "🤖 Creating AWX instance..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-awx-instance.yml && \
+	popd > /dev/null
+	@echo "✅ AWX instance created"

@@ -1,0 +1,130 @@
+---
+# Ansible playbook to create a pull-through cache registry for Quay.io
+# Usage: ansible-playbook -i inventory.yml create-registry-cache.yml
+
+- name: Create pull-through cache registry for Quay.io
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    registry_container_name: quay-cache
+    registry_ip: 192.168.1.22
+    registry_port: 5000
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_interface: eno1
+    macvlan_network_name: okd-lb-net
+    registry_volume_name: quay-cache-data
+    registry_config_dir: /opt/quay-cache
+
+  tasks:
+    - name: Create registry config directory
+      ansible.builtin.file:
+        path: "{{ registry_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy registry config
+      ansible.builtin.copy:
+        src: registry-cache/config.yml
+        dest: "{{ registry_config_dir }}/config.yml"
+        mode: '0644'
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if volume exists
+      ansible.builtin.command:
+        cmd: sudo podman volume exists {{ registry_volume_name }}
+      register: volume_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create named volume for registry data
+      ansible.builtin.command:
+        cmd: sudo podman volume create {{ registry_volume_name }}
+      when: volume_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ registry_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start registry container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ registry_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ registry_ip }}
+          --restart always
+          -v {{ registry_config_dir }}/config.yml:/etc/docker/registry/config.yml:ro,Z
+          -v {{ registry_volume_name }}:/var/lib/registry:Z
+          docker.io/registry:2
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ registry_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ registry_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 10
+      delay: 2
+      changed_when: false
+
+    - name: Wait for registry to be ready
+      ansible.builtin.uri:
+        url: "http://{{ registry_ip }}:{{ registry_port }}/v2/"
+        method: GET
+        status_code: 200
+      register: registry_ready
+      until: registry_ready.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "Pull-through cache registry created successfully!"
+          - ""
+          - "Container: {{ registry_container_name }}"
+          - "IP Address: {{ registry_ip }}"
+          - "Port: {{ registry_port }}"
+          - "Volume: {{ registry_volume_name }}"
+          - "Upstream: quay.io"
+          - ""
+          - "Registry URL: {{ registry_ip }}:{{ registry_port }}"
+          - ""
+          - "Usage Examples:"
+          - "  # Pull quay.io/openshift/okd-content through cache:"
+          - "  podman pull {{ registry_ip }}:{{ registry_port }}/openshift/okd-content"
+          - ""
+          - "  # For OKD/OpenShift, add to registries.conf:"
+          - "  [[registry]]"
+          - "    location = \"quay.io\""
+          - "    [[registry.mirror]]"
+          - "      location = \"{{ registry_ip }}:{{ registry_port }}\""
+          - "      insecure = true"

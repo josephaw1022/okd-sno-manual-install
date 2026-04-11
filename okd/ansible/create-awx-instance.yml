@@ -1,0 +1,199 @@
+---
+# Ansible playbook to create an AWX instance
+# Usage: ansible-playbook -i inventory.yml create-awx-instance.yml
+#
+# Prerequisites:
+#   - AWX Operator installed (run install-awx-operator.yml first)
+#   - Connected to OpenShift cluster (oc login)
+#
+# This creates an AWX instance managed by the AWX Operator
+
+- name: Create AWX Instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    awx_namespace: awx
+    awx_instance_name: "{{ lookup('env', 'AWX_INSTANCE_NAME') | default('awx', true) }}"
+    awx_admin_user: "{{ lookup('env', 'AWX_ADMIN_USER') | default('admin', true) }}"
+    # External PostgreSQL settings
+    pg_host: "{{ lookup('env', 'AWX_PG_HOST') | default('192.168.1.21', true) }}"
+    pg_port: "{{ lookup('env', 'AWX_PG_PORT') | default('5432', true) }}"
+    pg_database: "{{ lookup('env', 'AWX_PG_DATABASE') | default('awx', true) }}"
+    pg_user: "{{ lookup('env', 'AWX_PG_USER') | default('awx', true) }}"
+    pg_password: "{{ lookup('env', 'AWX_PG_PASSWORD') | default('awxpass', true) }}"
+    # Route hostname (uses OpenShift Routes like the console)
+    awx_hostname: "{{ lookup('env', 'AWX_HOSTNAME') | default('awx.apps.okd.kubesoar.com', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: "{{ awx_namespace }}"
+      register: ns_check
+      failed_when: false
+
+    - name: Fail if AWX namespace doesn't exist
+      ansible.builtin.fail:
+        msg: |
+          AWX namespace '{{ awx_namespace }}' not found.
+          Run 'make install-awx-operator' first to install the AWX Operator.
+      when: ns_check.resources is not defined or ns_check.resources | length == 0
+
+    - name: Check if AWX operator is installed
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ awx_namespace }}"
+        name: awx-operator-controller-manager
+      register: operator_check
+      failed_when: false
+
+    - name: Fail if AWX operator is not installed
+      ansible.builtin.fail:
+        msg: |
+          AWX Operator not found in namespace '{{ awx_namespace }}'.
+          Run 'make install-awx-operator' first to install the AWX Operator.
+      when: >
+        operator_check.resources is not defined or
+        operator_check.resources | length == 0 or
+        (operator_check.resources[0].status.readyReplicas | default(0)) < 1
+
+    - name: Create PostgreSQL configuration secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: awx-postgres-configuration
+            namespace: "{{ awx_namespace }}"
+          type: Opaque
+          stringData:
+            host: "{{ pg_host }}"
+            port: "{{ pg_port }}"
+            database: "{{ pg_database }}"
+            username: "{{ pg_user }}"
+            password: "{{ pg_password }}"
+            type: unmanaged
+
+    - name: Create AWX instance
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: awx.ansible.com/v1beta1
+          kind: AWX
+          metadata:
+            name: "{{ awx_instance_name }}"
+            namespace: "{{ awx_namespace }}"
+          spec:
+            admin_user: "{{ awx_admin_user }}"
+            # Use external PostgreSQL
+            postgres_configuration_secret: awx-postgres-configuration
+            # Projects stored in container (no extra PVC needed)
+            projects_persistence: false
+            # Reduce resource requests to fit on limited CPU cluster
+            web_resource_requirements:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            task_resource_requirements:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            ee_resource_requirements:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            # Use OpenShift Route (same as OKD console)
+            ingress_type: route
+            route_tls_termination_mechanism: edge
+            route_host: "{{ awx_hostname }}"
+
+    - name: Wait for AWX instance to be deployed
+      kubernetes.core.k8s_info:
+        api_version: awx.ansible.com/v1beta1
+        kind: AWX
+        namespace: "{{ awx_namespace }}"
+        name: "{{ awx_instance_name }}"
+      register: awx_instance
+      until: >
+        awx_instance.resources | length > 0 and
+        awx_instance.resources[0].status is defined and
+        awx_instance.resources[0].status.conditions is defined and
+        (awx_instance.resources[0].status.conditions | selectattr('type', 'equalto', 'Running') | selectattr('status', 'equalto', 'True') | list | length > 0)
+      retries: 60
+      delay: 15
+      failed_when: false
+
+    - name: Wait for AWX web deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ awx_namespace }}"
+        name: "{{ awx_instance_name }}-web"
+      register: web_deployment
+      until: >
+        web_deployment.resources | length > 0 and
+        web_deployment.resources[0].status is defined and
+        web_deployment.resources[0].status.readyReplicas is defined and
+        web_deployment.resources[0].status.readyReplicas >= 1
+      retries: 60
+      delay: 15
+      failed_when: false
+
+    - name: Get AWX admin password secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ awx_namespace }}"
+        name: "{{ awx_instance_name }}-admin-password"
+      register: admin_secret
+      failed_when: false
+
+    - name: Get AWX route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ awx_namespace }}"
+        name: "{{ awx_instance_name }}"
+      register: awx_route
+      failed_when: false
+
+    - name: Display AWX instance information
+      ansible.builtin.debug:
+        msg: |
+          ✅ AWX Instance deployment complete!
+          
+          Instance Name: {{ awx_instance_name }}
+          Namespace: {{ awx_namespace }}
+          Storage Class: {{ awx_postgres_storage_class }}
+          
+          Access URL: https://{{ awx_route.resources[0].spec.host | default(awx_hostname) }}
+          Admin User: {{ awx_admin_user }}
+          Admin Password: {{ admin_secret.resources[0].data.password | b64decode | default('(check secret ' + awx_instance_name + '-admin-password)') }}
+          
+          To get the admin password manually:
+            oc get secret {{ awx_instance_name }}-admin-password -n {{ awx_namespace }} -o jsonpath='{.data.password}' | base64 -d
+      when: admin_secret.resources | length > 0
+
+    - name: Display pending message if secret not ready
+      ansible.builtin.debug:
+        msg: |
+          ⏳ AWX Instance is still deploying...
+          
+          Instance Name: {{ awx_instance_name }}
+          Namespace: {{ awx_namespace }}
+          Storage Class: {{ awx_postgres_storage_class }}
+          
+          Check status with:
+            oc get awx -n {{ awx_namespace }}
+            oc get pods -n {{ awx_namespace }}
+            oc get route -n {{ awx_namespace }}
+          
+          Once ready, get the admin password with:
+            oc get secret {{ awx_instance_name }}-admin-password -n {{ awx_namespace }} -o jsonpath='{.data.password}' | base64 -d
+      when: admin_secret.resources | length == 0
