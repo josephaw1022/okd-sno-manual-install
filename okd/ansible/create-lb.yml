@@ -19,13 +19,13 @@
       ansible.builtin.file:
         path: "{{ nginx_config_dir }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
     - name: Copy nginx config
       ansible.builtin.copy:
         src: nginx-lb/nginx.conf
         dest: "{{ nginx_config_dir }}/nginx.conf"
-        mode: '0644'
+        mode: "0644"
 
     - name: Check if macvlan network exists
       ansible.builtin.command:

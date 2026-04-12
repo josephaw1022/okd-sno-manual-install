@@ -3,30 +3,33 @@
 This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 server using libvirt/KVM and the **agent-based installer**. This approach uses a single ISO for all nodes - no separate bootstrap VM required.
 
 **Features:**
+
 - **Cilium CNI** - Uses Cilium as the Container Network Interface instead of OVNKubernetes
 - Agent-based installation (single ISO for all nodes)
 - Automated VM provisioning via Ansible
 
 **Target Environment:**
+
 - CentOS Stream 10 server with 125GB RAM, 13 CPUs
 - VMs created via libvirt/virt-manager
 - Network: 192.168.0.0/21 (private router network)
 
 **Reference:**
+
 - [OKD Installation on Any Platform](https://docs.okd.io/latest/installing/installing_platform_agnostic/installing-platform-agnostic.html)
 - [Cilium OLM for OpenShift](https://github.com/isovalent/olm-for-cilium)
-
-
 
 ## Prerequisites
 
 ### On your local machine (where you generate the ISO):
+
 - podman
 - jq
 - openshift-install and oc CLI tools
 - Ansible (for deployment to server)
 
 ### On the libvirt server (CentOS Stream 10):
+
 - libvirt, qemu-kvm, virt-manager
 - Sufficient resources (125GB RAM, 13 CPUs recommended)
 
@@ -35,7 +38,6 @@ This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 s
 sudo dnf install -y libvirt qemu-kvm virt-manager virt-install
 sudo systemctl enable --now libvirtd
 ```
-
 
 ## DNS Setup
 
@@ -47,7 +49,7 @@ First, ensure your Pi-hole server is configured in `ansible/inventory.yml`:
 pihole:
   hosts:
     pihole-server:
-      ansible_host: 192.168.1.5  # Your Pi-hole IP
+      ansible_host: 192.168.1.5 # Your Pi-hole IP
       dnsmasq_conf_dir: /etc/dnsmasq.d
 ```
 
@@ -61,7 +63,6 @@ This copies the dnsmasq config from `dnsmasq/okd.conf` to your Pi-hole server an
 
 **Manual Setup:** If you prefer to configure DNS manually, see the example config in `dnsmasq/okd.conf`.
 
-
 ## Load Balancer Setup (Optional but Recommended)
 
 For high availability, set up an nginx load balancer that distributes traffic across all master nodes:
@@ -72,8 +73,9 @@ make create-lb
 ```
 
 This creates an nginx container at `192.168.1.20` that load balances:
+
 - API server (6443) → all masters
-- Machine Config Server (22623) → all masters  
+- Machine Config Server (22623) → all masters
 - HTTP/HTTPS ingress (80/443) → all masters
 
 To remove the load balancer:
@@ -81,7 +83,6 @@ To remove the load balancer:
 ```bash
 make destroy-lb
 ```
-
 
 ## Configure Values in Makefile
 
@@ -96,9 +97,9 @@ SSH_KEY ?= ~/.ssh/id_ed25519.pub
 MACHINE_NETWORK_CIDR ?= 192.168.0.0/21
 
 # Node IPs
-MASTER0_IP ?= 192.168.1.10
+MASTER0_IP ?= 192.168.1.22
 MASTER1_IP ?= 192.168.1.11
-MASTER2_IP ?= 192.168.1.12
+MASTER2_IP ?= 192.168.1.24
 
 # Gateway/DNS
 GATEWAY_IP ?= 192.168.1.1
@@ -112,10 +113,9 @@ VM_MEMORY ?= 41984
 VM_DISK_SIZE ?= 120
 
 # Remote server
-SERVER_HOST ?= 192.168.1.100
+SERVER_HOST ?= 192.168.1.220
 SERVER_USER ?= root
 ```
-
 
 ## Installation Steps
 
@@ -133,6 +133,7 @@ make build
 ```
 
 This will:
+
 1. Generate `install-config.yaml` for 3-node cluster (with `networkType: None` to skip default CNI)
 2. Generate `agent-config.yaml` with static IPs and MAC addresses
 3. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
@@ -151,7 +152,7 @@ all:
     libvirt_hosts:
       hosts:
         okd-server:
-          ansible_host: 192.168.1.100  # Your server IP
+          ansible_host: 192.168.1.220 # Your server IP
           vm_cpus: 4
           vm_memory_mb: 41984
           vm_disk_size_gb: 120
@@ -297,9 +298,9 @@ make apply-ingress-cert
 ### SSH Access to Nodes
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 core@192.168.1.10  # master-0
+ssh -i ~/.ssh/id_ed25519 core@192.168.1.22  # master-0
 ssh -i ~/.ssh/id_ed25519 core@192.168.1.11  # master-1
-ssh -i ~/.ssh/id_ed25519 core@192.168.1.12  # master-2
+ssh -i ~/.ssh/id_ed25519 core@192.168.1.24  # master-2
 ```
 
 ### Clean Up and Start Over
@@ -321,7 +322,7 @@ sudo hostnamectl set-hostname master-0.okd.kubesoar.com
 ### View Agent Logs on Rendezvous Node
 
 ```bash
-ssh core@192.168.1.10 "journalctl -b -f -u agent.service"
+ssh core@192.168.1.22 "journalctl -b -f -u agent.service"
 ```
 
 ### Approve CSRs (if nodes aren't joining)

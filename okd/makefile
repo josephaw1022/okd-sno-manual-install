@@ -8,9 +8,9 @@ SSH_KEY ?= ~/.ssh/id_ed25519.pub
 MACHINE_NETWORK_CIDR ?= 192.168.0.0/21
 
 # Node IPs for 3 master nodes
-MASTER0_IP ?= 192.168.1.10
-MASTER1_IP ?= 192.168.1.13
-MASTER2_IP ?= 192.168.1.12
+MASTER0_IP ?= 192.168.1.22
+MASTER1_IP ?= 192.168.1.23
+MASTER2_IP ?= 192.168.1.24
 
 # Gateway/DNS server
 GATEWAY_IP ?= 192.168.1.1
@@ -21,7 +21,7 @@ VM_MEMORY ?= 41984
 VM_DISK_SIZE ?= 120
 
 # Remote server settings
-SERVER_HOST ?= 192.168.1.100
+SERVER_HOST ?= 192.168.1.220
 SERVER_USER ?= root
 
 # Cilium CNI settings

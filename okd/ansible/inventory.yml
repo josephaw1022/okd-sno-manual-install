@@ -2,7 +2,7 @@ all:
   vars:
     ansible_user: jwhiteaker
     ansible_python_interpreter: /usr/bin/python3
-    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
   children:
     libvirt_hosts:
       vars:
@@ -13,7 +13,7 @@ all:
           ansible_host: 192.168.1.9
           # VM configuration
           vm_cpus: 4
-          vm_memory_mb: 30720  # 30 GB per node
+          vm_memory_mb: 30720 # 30 GB per node
           vm_disk_size_gb: 175
           iso_dest_path: /var/lib/libvirt/images
           vm_network: default

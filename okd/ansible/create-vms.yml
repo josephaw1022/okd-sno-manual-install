@@ -20,16 +20,16 @@
     okd_vms:
       - name: "{{ cluster_name }}-master-0"
         mac: "52:54:00:00:00:10"
-        ip: "192.168.1.10"
-        memory_mb: 30720  # 30GB
+        ip: "192.168.1.22"
+        memory_mb: 30720 # 30GB
       - name: "{{ cluster_name }}-master-1"
         mac: "52:54:00:00:00:11"
-        ip: "192.168.1.13"
-        memory_mb: 30720  # 30GB
+        ip: "192.168.1.23"
+        memory_mb: 30720 # 30GB
       - name: "{{ cluster_name }}-master-2"
         mac: "52:54:00:00:00:12"
-        ip: "192.168.1.12"
-        memory_mb: 30720  # 30GB
+        ip: "192.168.1.24"
+        memory_mb: 30720 # 30GB
 
   tasks:
     - name: Ensure libvirt is running
@@ -58,7 +58,7 @@
       ansible.builtin.file:
         path: "{{ iso_dest_path }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
     - name: Create master VM disks
       ansible.builtin.command:
