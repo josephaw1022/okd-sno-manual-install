@@ -21,7 +21,7 @@ VM_MEMORY ?= 41984
 VM_DISK_SIZE ?= 120
 
 # Remote server settings
-SERVER_HOST ?= 192.168.1.220
+SERVER_HOST ?= 192.168.1.9
 SERVER_USER ?= root
 
 # Cilium CNI settings
