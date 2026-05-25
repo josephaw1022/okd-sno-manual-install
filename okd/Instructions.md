@@ -4,7 +4,6 @@ This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 s
 
 **Features:**
 
-- **Cilium CNI** - Uses Cilium as the Container Network Interface instead of OVNKubernetes
 - Agent-based installation (single ISO for all nodes)
 - Automated VM provisioning via Ansible
 
@@ -17,7 +16,6 @@ This guide covers setting up a 3-node OKD master cluster on a CentOS Stream 10 s
 **Reference:**
 
 - [OKD Installation on Any Platform](https://docs.okd.io/latest/installing/installing_platform_agnostic/installing-platform-agnostic.html)
-- [Cilium OLM for OpenShift](https://github.com/isovalent/olm-for-cilium)
 
 ## Prerequisites
 
@@ -104,9 +102,6 @@ MASTER2_IP ?= 192.168.1.24
 # Gateway/DNS
 GATEWAY_IP ?= 192.168.1.1
 
-# Cilium CNI settings
-CILIUM_VERSION ?= 1.15.1
-
 # Libvirt VM settings
 VM_CPUS ?= 4
 VM_MEMORY ?= 41984
@@ -134,11 +129,9 @@ make build
 
 This will:
 
-1. Generate `install-config.yaml` for 3-node cluster (with `networkType: None` to skip default CNI)
+1. Generate `install-config.yaml` for 3-node cluster
 2. Generate `agent-config.yaml` with static IPs and MAC addresses
 3. Create the agent installer ISO (`cluster/agent.x86_64.iso`)
-
-**Note:** Cilium CNI is installed post-bootstrap via `make install-cilium` (see Step 7). The embedded manifest approach doesn't work because the bootstrap node can't apply manifests without network connectivity.
 
 **Important:** The `agent-config.yaml` maps MAC addresses to IPs. Make sure the MAC addresses in the config match what you'll use in the VMs.
 
@@ -185,9 +178,7 @@ This creates 3 master VMs, all booting from the same agent ISO. The first node (
 
 ### Step 7: Wait for Nodes to Boot
 
-After running `make create-vms`, the VMs will boot and begin the agent-based installation process. However, since we use `networkType: None` in the install config, the cluster won't have a CNI and pods won't be able to communicate.
-
-**Important:** The bootstrap process will stall until you install Cilium CNI.
+After running `make create-vms`, the VMs will boot and begin the agent-based installation process.
 
 Wait for the 2 non-rendezvous master nodes (master-1 and master-2) to shut down - after initial boot, they will install CoreOS and then power off.
 
@@ -199,31 +190,13 @@ make start-vms
 
 ### Step 9: Set Up Kubeconfig
 
-This is required so the Cilium CLI can communicate with the cluster:
+Set up local access to the cluster:
 
 ```bash
 make use-kubeconfig
 ```
 
-### Step 10: Install Cilium CNI
-
-This is required for the bootstrap to proceed:
-
-```bash
-make install-cilium
-```
-
-This installs Cilium with the correct CNI paths for OKD (`/etc/kubernetes/cni/net.d`). After Cilium is installed, the pods on the bootstrap/rendezvous node will be able to communicate with pods on the other master nodes.
-
-### Step 11: Verify Cilium is Running
-
-```bash
-cilium status
-```
-
-You should see all components showing `OK` and nodes becoming `Ready`.
-
-### Step 12: Monitor Installation
+### Step 10: Monitor Installation
 
 ```bash
 # Wait for install to complete
@@ -233,7 +206,7 @@ make wait-install
 make watch-bootstrap
 ```
 
-### Step 13: Access the Cluster
+### Step 11: Access the Cluster
 
 ```bash
 make use-kubeconfig
@@ -244,21 +217,6 @@ oc get co
 ---
 
 ## Post-Installation
-
-### Verify Cilium CNI
-
-After the cluster is up, verify Cilium is running:
-
-```bash
-cilium status
-oc get pods -n kube-system -l app.kubernetes.io/name=cilium
-```
-
-To enable Hubble observability:
-
-```bash
-cilium upgrade --set hubble.enabled=true --set hubble.relay.enabled=true --set hubble.ui.enabled=true
-```
 
 ### Entra ID (Azure AD)
 

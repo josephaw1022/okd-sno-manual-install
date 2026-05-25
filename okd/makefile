@@ -28,9 +28,6 @@ VM_DISK_SIZE ?= 120
 SERVER_HOST ?= 192.168.1.9
 SERVER_USER ?= root
 
-# Cilium CNI settings
-CILIUM_VERSION ?= 1.16.5
-
 ## OKD values
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
@@ -131,37 +128,6 @@ create-manifests: ## Create the manifests directory structure for custom manifes
 	@echo "📁 Creating manifests directory structure..."
 	mkdir -p cluster/openshift
 	@echo "✅ Manifests directory created: cluster/openshift/"
-
-
-.PHONY: install-cilium-cli
-install-cilium-cli: ## Install Cilium CLI if not present.
-	@if ! command -v cilium &> /dev/null; then \
-		echo "📦 Installing Cilium CLI..."; \
-		CILIUM_CLI_VERSION=$$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt); \
-		CLI_ARCH=amd64; \
-		curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/$${CILIUM_CLI_VERSION}/cilium-linux-$${CLI_ARCH}.tar.gz{,.sha256sum}; \
-		sha256sum --check cilium-linux-$${CLI_ARCH}.tar.gz.sha256sum; \
-		sudo tar xzvfC cilium-linux-$${CLI_ARCH}.tar.gz /usr/local/bin; \
-		rm cilium-linux-$${CLI_ARCH}.tar.gz{,.sha256sum}; \
-		echo "✅ Cilium CLI installed"; \
-	else \
-		echo "✅ Cilium CLI already installed"; \
-	fi
-
-
-.PHONY: generate-cilium-manifests
-generate-cilium-manifests: create-manifests install-cilium-cli ## Generate Cilium manifests for OKD without OLM.
-	@echo "📋 Generating Cilium v$(CILIUM_VERSION) manifests for OKD (no OLM)..."
-	chmod +x ./scripts/generate-cilium-manifests-okd.sh
-	./scripts/generate-cilium-manifests-okd.sh $(CLUSTER_NAME) $(BASE_DOMAIN) $(CILIUM_VERSION)
-	@echo "✅ Cilium manifests generated for OKD"
-
-
-.PHONY: clean-cilium-tmp
-clean-cilium-tmp: ## Clean up temporary Cilium OLM directory.
-	@echo "🧹 Cleaning up Cilium temp directory..."
-	rm -rf $(CILIUM_TMP_DIR)
-	@echo "✅ Cleaned $(CILIUM_TMP_DIR)"
 
 
 .PHONY: format-files
@@ -369,8 +335,6 @@ start-vms: ## Start all stopped VMs on the libvirt server via Ansible.
 	ansible-playbook -i inventory.yml start-vms.yml && \
 	popd > /dev/null
 	@echo "✅ VMs started"
-	@echo ""
-	@echo "📋 After nodes are ready, run 'make install-cilium' to add Cilium CNI so that the master nodes can communicate to the bootstrap node and the pods can communicate"
 
 
 .PHONY: reboot-non-bootstrap
@@ -486,65 +450,6 @@ fix-bootstrap: ## Create bootstrap configmap to unblock openshift-apiserver API 
 	@echo "🔧 Creating bootstrap configmap..."
 	@printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bootstrap\n  namespace: kube-system\ndata:\n  status: complete\n' | oc apply -f -
 	@echo "✅ Bootstrap configmap created - openshift-apiserver should now register Route API"
-
-
-##@ Cilium CNI
-
-.PHONY: install-cilium
-install-cilium: install-cilium-cli ## Install Cilium CNI on running OKD cluster (post-bootstrap).
-	@echo "🗑️ Removing existing Cilium workloads (if any)..."
-	-kubectl delete -i=false namespace cilium cilium-secrets --ignore-not-found=true --wait=true 2>/dev/null || true
-	-@kubectl get clusterroles -o name 2>/dev/null | grep -E 'cilium|hubble' | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
-	-@kubectl get clusterrolebindings -o name 2>/dev/null | grep -E 'cilium|hubble' | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
-	-@kubectl get crd -o name 2>/dev/null | grep cilium | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
-	-@kubectl get ingressclass -o name 2>/dev/null | grep cilium | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
-	-@kubectl get gatewayclass -o name 2>/dev/null | grep cilium | xargs -r kubectl delete -i=false --ignore-not-found=true 2>/dev/null || true
-	-@kubectl get configmap -n kube-system cilium-config --ignore-not-found=true -o name 2>/dev/null | xargs -r kubectl delete -i=false -n kube-system --ignore-not-found=true 2>/dev/null || true
-	@echo "🌐 Installing Cilium $(CILIUM_VERSION) on OKD cluster..."
-	cilium install \
-		--version $(CILIUM_VERSION) \
-		--set cluster.name=$(CLUSTER_NAME) \
-		--set cluster.id=1 \
-		--set kubeProxyReplacement=true \
-		--set k8sServiceHost=api.$(CLUSTER_NAME).$(BASE_DOMAIN) \
-		--set k8sServicePort=6443 \
-		--set ipam.mode=cluster-pool \
-		--set ipam.operator.clusterPoolIPv4PodCIDRList="{10.128.0.0/14}" \
-		--set ipam.operator.clusterPoolIPv4MaskSize=20 \
-		--set cni.binPath=/var/lib/cni/bin \
-		--set cni.confPath=/etc/kubernetes/cni/net.d \
-		--set cni.exclusive=false \
-		--set securityContext.privileged=true \
-		--set nodeinit.enabled=true \
-		--set hubble.enabled=true \
-		--set hubble.relay.enabled=true \
-		--set hubble.ui.enabled=true \
-		--set ingressController.enabled=true \
-		--set ingressController.loadbalancerMode=shared \
-		--set ingressController.enableProxyProtocol=true \
-		--set gatewayAPI.enabled=true \
-		--set gatewayAPI.enableProxyProtocol=true \
-		--wait=false
-	@echo "✅ Cilium installed - run 'cilium status' to verify"
-
-
-.PHONY: cilium-status
-cilium-status: ## Check Cilium CNI status.
-	@cilium status
-
-
-.PHONY: fix-multus-cni
-fix-multus-cni: ## Fix multus CNI by symlinking Cilium config to multus autoconfig dir.
-	@echo "🔧 Fixing multus CNI configuration..."
-	@./cluster-setup/fix-multus-cni.sh
-	@echo "✅ Multus CNI fixed"
-
-
-.PHONY: uninstall-cilium
-uninstall-cilium: ## Uninstall Cilium CNI from cluster.
-	@echo "🗑️ Uninstalling Cilium..."
-	cilium uninstall --wait
-	@echo "✅ Cilium uninstalled"
 
 
 ##@ Operators

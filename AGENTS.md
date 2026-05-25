@@ -1,6 +1,6 @@
 # Openshift homelab repo
 
-The github repo for this project is location at https://github.com/josephaw1022/okd-sno-manual-install/tree/current-setup-3-node-cluster-without-cilium
+The github repo for this project is located at https://github.com/josephaw1022/okd-sno-manual-install
 
 # Openshift Cluster
 
@@ -8,5 +8,4 @@ The github repo for this project is location at https://github.com/josephaw1022/
 
 # Gotchas
 
-- this cluster does not make any use of cilium... If you see any references to cilium, ignore them.
 - All tasks are done through the makefile in the okd directory... Do not run any bash scripts or ansible playbooks directly in this repo.
