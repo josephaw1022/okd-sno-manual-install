@@ -1,0 +1,13 @@
+# Kyverno namespace (see README.md for security model).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  labels:
+    # Align namespace Pod Security Admission with workload profile; Kyverno controller pods are
+    # compatible with Kubernetes "restricted" when combined with Helm values-openshift.yaml
+    # (OpenShift mutates unspecified security contexts from restricted-v2 SCC).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -1,0 +1,5 @@
+# Only Kubernetes manifests for `oc apply -k`; Helm values files are sibling YAML and are not listed here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml

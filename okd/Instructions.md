@@ -251,6 +251,31 @@ make apply-ingress-cert
 
 ---
 
+### Kyverno policy engine
+
+From the [`okd/`](.) directory (`oc login` applied, Helm 3 available):
+
+```bash
+make install-kyverno
+```
+
+This applies [`cluster-setup/kyverno/kustomization.yaml`](cluster-setup/kyverno/kustomization.yaml) (namespace labeled for **restricted** Pod Security Admission), then installs the [`kyverno/kyverno`](https://kyverno.github.io/kyverno/) chart using [`values-openshift.yaml`](cluster-setup/kyverno/values-openshift.yaml) (placeholder for overrides; chart defaults satisfy **`restricted-v2`**) plus [`values-ha.yaml`](cluster-setup/kyverno/values-ha.yaml) (three replicas plus PDBs). See [`cluster-setup/kyverno/README.md`](cluster-setup/kyverno/README.md). The Makefile pins chart **3.8.1** (Kyverno **v1.18.1**). Override as needed:
+
+```bash
+make install-kyverno KYVERNO_CHART_VERSION=3.7.2
+```
+
+Remove the Helm release and delete the Kyverno namespace (same defaults; override `KYVERNO_NAMESPACE` / `KYVERNO_RELEASE` if yours differ):
+
+```bash
+make uninstall-kyverno
+```
+If you reused an older version of this repo that created `SecurityContextConstraints/kyverno-custom`, delete that SCC so workloads are not authorized for a permissive fallback: `oc delete scc kyverno-custom`.
+
+If you rename the namespace, edit [`cluster-setup/kyverno/namespace.yaml`](cluster-setup/kyverno/namespace.yaml) and install with matching `KYVERNO_NAMESPACE`.
+
+---
+
 ## Troubleshooting
 
 ### SSH Access to Nodes

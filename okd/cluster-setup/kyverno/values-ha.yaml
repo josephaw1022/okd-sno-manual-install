@@ -1,0 +1,29 @@
+# High availability: scale Kyverno controller Deployments across nodes.
+# Intended for clusters with capacity for multiple replicas per component (e.g. 3+ schedulable nodes).
+# PDBs keep minimum availability during voluntary disruptions.
+#
+# Merged after values-openshift.yaml in `make install-kyverno` (Helm deep-merges value maps).
+
+admissionController:
+  replicas: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+backgroundController:
+  replicas: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+cleanupController:
+  replicas: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+reportsController:
+  replicas: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2

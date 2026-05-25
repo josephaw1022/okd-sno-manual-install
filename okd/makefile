@@ -526,6 +526,52 @@ install-awx-operator: ## Install AWX Operator for Ansible automation.
 	@echo "✅ AWX Operator installed"
 
 
+## Kyverno (namespace via kustomize; Helm installs the chart release)
+KYVERNO_NAMESPACE ?= kyverno
+KYVERNO_RELEASE ?= kyverno
+# Pin chart version (Kyverno Helm chart 3.8.1 / app v1.18.1); override to upgrade.
+KYVERNO_CHART_VERSION ?= 3.8.1
+
+
+.PHONY: install-kyverno
+install-kyverno: ## Install Kyverno (namespace via kustomize, then Helm; chart defaults ↔ restricted-v2 SCC).
+	@echo "📋 Applying Kyverno namespace..."
+	@echo "⚠️  Helm values live beside manifests; only kustomize resources are applied (see cluster-setup/kyverno/kustomization.yaml)."
+	oc apply -k cluster-setup/kyverno/
+	@echo "📦 Installing Kyverno Helm release ($(KYVERNO_RELEASE))..."
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@if ! helm repo list 2>/dev/null | grep -q '^kyverno[[:space:]]'; then \
+	  helm repo add kyverno https://kyverno.github.io/kyverno/; \
+	fi
+	helm repo update kyverno
+	helm upgrade --install "$(KYVERNO_RELEASE)" kyverno/kyverno \
+	  --namespace "$(KYVERNO_NAMESPACE)" \
+	  --create-namespace=false \
+	  -f cluster-setup/kyverno/values-openshift.yaml \
+	  -f cluster-setup/kyverno/values-ha.yaml \
+	  $(if $(KYVERNO_CHART_VERSION),--version $(KYVERNO_CHART_VERSION),)
+	@echo "✅ Kyverno Helm release installed (namespace $(KYVERNO_NAMESPACE))"
+
+
+.PHONY: uninstall-kyverno
+uninstall-kyverno: ## Remove Kyverno Helm release and namespace.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall release; delete the namespace manually if needed."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Helm release $(KYVERNO_RELEASE) (namespace $(KYVERNO_NAMESPACE))..."
+	helm uninstall "$(KYVERNO_RELEASE)" \
+	  --namespace "$(KYVERNO_NAMESPACE)" \
+	  --wait \
+	  --ignore-not-found
+	@echo "🗑️ Deleting namespace $(KYVERNO_NAMESPACE)..."
+	oc delete namespace "$(KYVERNO_NAMESPACE)" --ignore-not-found
+	@echo "✅ Kyverno Helm release and namespace removed"
+
+
 .PHONY: create-awx-postgres
 create-awx-postgres: ## Create external PostgreSQL container for AWX.
 	@echo "🐘 Creating PostgreSQL container for AWX..."

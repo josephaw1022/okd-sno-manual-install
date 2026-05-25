@@ -1,0 +1,7 @@
+# OpenShift / OKD (4.11+): the Kyverno chart’s default workload securityContexts already match restrictive
+# profiles (restricted-v2 SCC and Kubernetes PSA `restricted`).
+#
+# This file is intentionally empty so merged values default to upstream chart behavior. Add overrides here
+# only if your cluster disagrees — see Kyverno’s OpenShift platform notes before changing workloads:
+# https://kyverno.io/docs/installation/platform-notes/#notes-for-openshift-users
+{}
