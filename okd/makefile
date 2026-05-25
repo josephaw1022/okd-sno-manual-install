@@ -1,6 +1,10 @@
 # Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
-OKD_VERSION ?= 4.21.0-okd-scos.10
+# OKD values
+OKD_VERSION ?= 4.22.0-okd-scos.0
+
+# Openshift values
+# OKD_VERSION ?= 4.21.10
 ARCH ?= x86_64
 CLUSTER_NAME ?= okd
 BASE_DOMAIN ?= kubesoar.com
@@ -27,8 +31,13 @@ SERVER_USER ?= root
 # Cilium CNI settings
 CILIUM_VERSION ?= 1.16.5
 
+## OKD values
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
+
+## Openshift values
+# OC_URL = https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$(OCP_VERSION)/openshift-client-linux-$(OCP_VERSION).tar.gz
+# INSTALLER_URL = https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$(OCP_VERSION)/openshift-install-linux-$(OCP_VERSION).tar.gz
 
 ##@ General
 
