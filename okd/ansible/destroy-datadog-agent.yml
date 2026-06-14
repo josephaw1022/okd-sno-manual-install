@@ -1,0 +1,31 @@
+---
+# Remove Datadog agent Podman container from the libvirt host (desktop-server).
+# Usage: ansible-playbook -i inventory.yml destroy-datadog-agent.yml
+
+- name: Destroy Datadog agent on libvirt host
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    dd_container_name: dd-agent
+    dd_config_dir: /etc/datadog-agent
+
+  tasks:
+    - name: Remove Datadog agent container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ dd_container_name }}
+      changed_when: true
+      failed_when: false
+
+    - name: Remove Datadog agent config directory
+      ansible.builtin.file:
+        path: "{{ dd_config_dir }}"
+        state: absent
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "Datadog agent removed successfully!"
+          - ""
+          - "Removed:"
+          - "  - Container: {{ dd_container_name }}"
+          - "  - Config: {{ dd_config_dir }}"

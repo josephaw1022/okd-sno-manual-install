@@ -394,6 +394,30 @@ destroy-registry-cache: ## Destroy pull-through cache registry.
 	@echo "✅ Registry cache destroyed"
 
 
+# Datadog agent on desktop-server (libvirt host). Prompts for API key, site, and env at runtime.
+DD_AGENT_IMAGE ?= gcr.io/datadoghq/agent:7
+
+
+.PHONY: install-datadog-agent
+install-datadog-agent: ## Deploy Datadog agent on desktop-server (prompts for API key, site, env).
+	@echo "📊 Installing Datadog agent on desktop-server..."
+	@echo "   First run pulls a large container image and may take a few minutes."
+	@pushd ansible > /dev/null && \
+	DD_AGENT_IMAGE="$(DD_AGENT_IMAGE)" \
+	ansible-playbook -i inventory.yml install-datadog-agent.yml && \
+	popd > /dev/null
+	@echo "✅ Datadog agent installed"
+
+
+.PHONY: destroy-datadog-agent
+destroy-datadog-agent: ## Remove Datadog agent Podman container from desktop-server.
+	@echo "💥 Removing Datadog agent from desktop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-datadog-agent.yml && \
+	popd > /dev/null
+	@echo "✅ Datadog agent removed"
+
+
 ##@ Cluster Configuration
 
 .PHONY: setup-entraid
@@ -517,13 +541,40 @@ install-local-storage: ## Install Local Storage Operator with hostpath storage c
 	@echo "✅ Local Storage Operator installed"
 
 
+# AWX Operator (Helm chart: https://ansible-community.github.io/awx-operator-helm/)
+
+AWX_HELM_RELEASE ?= awx-operator
+# Pin Helm chart semver (see ansible-community awx-operator-helm Chart.yaml `version`; appVersion is bundled operator).
+
+AWX_OPERATOR_HELM_CHART_VERSION ?= 3.2.1
+
+
 .PHONY: install-awx-operator
-install-awx-operator: ## Install AWX Operator for Ansible automation.
-	@echo "🤖 Installing AWX Operator..."
+install-awx-operator: ## Install AWX Operator for Ansible automation (Helm chart, not OperatorHub).
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🤖 Installing AWX Operator Helm release ($(AWX_HELM_RELEASE)), chart $(AWX_OPERATOR_HELM_CHART_VERSION)..."
 	@pushd ansible > /dev/null && \
+	AWX_HELM_RELEASE="$(AWX_HELM_RELEASE)" AWX_OPERATOR_HELM_CHART_VERSION="$(AWX_OPERATOR_HELM_CHART_VERSION)" \
 	ansible-playbook -i inventory.yml install-awx-operator.yml && \
 	popd > /dev/null
 	@echo "✅ AWX Operator installed"
+
+
+.PHONY: uninstall-awx-operator
+uninstall-awx-operator: ## Remove AWX Operator Helm release only (does not delete the awx namespace or AWX CRs).
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling AWX Operator Helm release $(AWX_HELM_RELEASE) in namespace awx..."
+	helm uninstall "$(AWX_HELM_RELEASE)" \
+	  --namespace awx \
+	  --wait \
+	  --ignore-not-found
+	@echo "✅ Helm release removal requested (release $(AWX_HELM_RELEASE))"
 
 
 ## Kyverno (namespace via kustomize; Helm installs the chart release)

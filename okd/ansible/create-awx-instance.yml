@@ -3,7 +3,8 @@
 # Usage: ansible-playbook -i inventory.yml create-awx-instance.yml
 #
 # Prerequisites:
-#   - AWX Operator installed (run install-awx-operator.yml first)
+#   - AWX Operator installed via Helm (run install-awx-operator.yml / `make install-awx-operator`)
+#     Community chart docs: https://ansible-community.github.io/awx-operator-helm/
 #   - Connected to OpenShift cluster (oc login)
 #
 # This creates an AWX instance managed by the AWX Operator
@@ -170,7 +171,6 @@
           
           Instance Name: {{ awx_instance_name }}
           Namespace: {{ awx_namespace }}
-          Storage Class: {{ awx_postgres_storage_class }}
           
           Access URL: https://{{ awx_route.resources[0].spec.host | default(awx_hostname) }}
           Admin User: {{ awx_admin_user }}
@@ -187,7 +187,6 @@
           
           Instance Name: {{ awx_instance_name }}
           Namespace: {{ awx_namespace }}
-          Storage Class: {{ awx_postgres_storage_class }}
           
           Check status with:
             oc get awx -n {{ awx_namespace }}

@@ -1,25 +1,52 @@
 ---
-# Ansible playbook to install AWX Operator
+# Ansible playbook to install AWX Operator via Helm (community chart)
+#
 # Usage: ansible-playbook -i inventory.yml install-awx-operator.yml
 #
-# Prerequisites:
-#   - Connected to OpenShift cluster (oc login)
+# References:
+#   - https://ansible-community.github.io/awx-operator-helm/
+#   - Helm chart source: https://github.com/ansible-community/awx-operator-helm
 #
-# AWX is the open-source upstream project for Red Hat Ansible Automation Platform
-# This playbook installs the AWX Operator which manages AWX instances
+# Prerequisites:
+#   - Helm 3.x (`helm`), OpenShift/OpenShift-compatible cluster (`oc login`).
+#
+# Environment (optional overrides):
+#   AWX_HELM_RELEASE — Helm release name (default: awx-operator)
+#   AWX_OPERATOR_HELM_CHART_VERSION — chart version pinned for installs (see Chart.yaml version)
+#   AWX_OPERATOR_IMAGE — full operator controller image reference (digest or tag), e.g.
+#                         quay.io/ansible/awx-operator@sha256:...
+#                         Overrides chart default awx-manager image via --set-string.
 
-- name: Install AWX Operator
+- name: Install AWX Operator via Helm chart
   hosts: localhost
   connection: local
   gather_facts: false
-  module_defaults:
-    group/kubernetes.core.k8s:
-      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
   vars:
     awx_namespace: awx
-    awx_operator_version: "{{ lookup('env', 'AWX_OPERATOR_VERSION') | default('2.19.1', true) }}"
+    awx_operator_kubeconfig: >-
+      {{
+        lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true)
+      }}
+    awx_helm_release_name: "{{ lookup('env', 'AWX_HELM_RELEASE') | default('awx-operator', true) }}"
+    awx_operator_helm_chart_version: >-
+      {{
+        lookup('env', 'AWX_OPERATOR_HELM_CHART_VERSION') | default('3.2.1', true)
+      }}
+    awx_operator_image_override: "{{ lookup('env', 'AWX_OPERATOR_IMAGE') | default('', true) }}"
+  environment:
+    KUBECONFIG: "{{ awx_operator_kubeconfig }}"
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ awx_operator_kubeconfig }}"
 
   tasks:
+    - name: Fail if Helm CLI is unavailable
+      ansible.builtin.command:
+        argv: [helm, version]
+      register: helm_version_probe
+      changed_when: false
+      failed_when: helm_version_probe.rc != 0
+
     - name: Check if connected to OpenShift
       kubernetes.core.k8s_info:
         kind: Namespace
@@ -31,8 +58,34 @@
       ansible.builtin.fail:
         msg: |
           Not connected to OpenShift cluster.
-          Run 'oc login' first or ensure KUBECONFIG is set.
+          Run `oc login` first or ensure KUBECONFIG is set.
       when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure awx-operator Helm repository exists
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - awx-operator
+          - https://ansible-community.github.io/awx-operator-helm/
+      register: helm_repo_add_awx_operator
+      failed_when: >-
+        helm_repo_add_awx_operator.rc != 0 and
+        'already exists' not in (
+          (helm_repo_add_awx_operator.stderr | default('', true)) ~
+          (helm_repo_add_awx_operator.stdout | default('', true))
+        ) | lower
+      changed_when: helm_repo_add_awx_operator.rc == 0
+
+    - name: Update awx-operator Helm repository indexes
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - update
+          - awx-operator
+      changed_when: true
 
     - name: Create AWX namespace
       kubernetes.core.k8s:
@@ -43,56 +96,41 @@
           metadata:
             name: "{{ awx_namespace }}"
 
-    - name: Create OperatorGroup for AWX
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: operators.coreos.com/v1
-          kind: OperatorGroup
-          metadata:
-            name: awx-operator-group
-            namespace: "{{ awx_namespace }}"
-          spec:
-            targetNamespaces:
-              - "{{ awx_namespace }}"
+    - name: Compose base Helm argv for AWX operator install
+      ansible.builtin.set_fact:
+        _helm_awx_install_argv:
+          - helm
+          - upgrade
+          - "--install"
+          - "{{ awx_helm_release_name }}"
+          - awx-operator/awx-operator
+          - "--namespace"
+          - "{{ awx_namespace }}"
+          - "--create-namespace"
+          - "--version"
+          - "{{ awx_operator_helm_chart_version }}"
+          - "-f"
+          - "{{ playbook_dir }}/files/awx-operator-helm-values.yaml"
 
-    - name: Create AWX Operator Subscription
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: operators.coreos.com/v1alpha1
-          kind: Subscription
-          metadata:
-            name: awx-operator
-            namespace: "{{ awx_namespace }}"
-          spec:
-            channel: fast
-            installPlanApproval: Automatic
-            name: awx-operator
-            source: community-operators
-            sourceNamespace: openshift-marketplace
+    - name: Append operator controller image override to Helm argv
+      ansible.builtin.set_fact:
+        _helm_awx_install_argv: >-
+          {{
+            _helm_awx_install_argv +
+              [
+                '--set-string',
+                'operator-controller-containers.awx-manager.image=' ~ awx_operator_image_override,
+              ]
+          }}
+      when: awx_operator_image_override | length > 0
 
-    - name: Wait for AWX operator to be installed (CSV Succeeded)
-      kubernetes.core.k8s_info:
-        api_version: operators.coreos.com/v1alpha1
-        kind: ClusterServiceVersion
-        namespace: "{{ awx_namespace }}"
-        label_selectors:
-          - "operators.coreos.com/awx-operator.awx"
-      register: csv_status
-      until: >
-        csv_status.resources | length > 0 and
-        csv_status.resources[0].status is defined and
-        csv_status.resources[0].status.phase == 'Succeeded'
-      retries: 60
-      delay: 10
-      failed_when: false
-
-    - name: Check AWX operator installation status
-      ansible.builtin.debug:
-        msg: >-
-          AWX Operator status: {{ csv_status.resources[0].status.phase | default('Installing...') }}
-      when: csv_status.resources | length > 0
+    - name: Install or upgrade AWX Operator Helm release
+      ansible.builtin.command:
+        argv: "{{ _helm_awx_install_argv }}"
+      register: helm_awx_install
+      changed_when: >-
+        'has been upgraded' in helm_awx_install.stdout | default('', true)
+        or 'installed' in (helm_awx_install.stdout | default('', true) | lower)
 
     - name: Wait for AWX operator deployment to be ready
       kubernetes.core.k8s_info:
@@ -106,18 +144,23 @@
         operator_deployment.resources[0].status is defined and
         operator_deployment.resources[0].status.readyReplicas is defined and
         operator_deployment.resources[0].status.readyReplicas >= 1
-      retries: 30
+      retries: 36
       delay: 10
       failed_when: false
 
     - name: Display installation summary
       ansible.builtin.debug:
         msg: |
-          ✅ AWX Operator installation complete!
-          
-          Operator Version: {{ awx_operator_version }}
+          ✅ AWX Operator Helm release installation complete!
+
+          Chart: ansible-community awx-operator (helm chart version {{ awx_operator_helm_chart_version }})
+          Release name: {{ awx_helm_release_name }}
           Namespace: {{ awx_namespace }}
-          
+          {% if awx_operator_image_override | length > 0 %}Operator controller image override: {{ awx_operator_image_override }}
+
+          {% else %}Operator controller image: chart default (see chart appVersion / values)
+
+          {% endif %}
           Next steps:
-          1. Run 'make create-awx-instance' to create an AWX instance
-          2. Or create a custom AWX CR in the {{ awx_namespace }} namespace
+          1. Run `make create-awx-instance` to create an AWX instance
+          2. Or create a custom AWX CR in namespace {{ awx_namespace }}

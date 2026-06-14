@@ -1,0 +1,126 @@
+---
+# Deploy Datadog agent as a Podman container on the libvirt host (desktop-server).
+#
+# Prompts for Datadog settings at runtime (API key input is hidden).
+# Optional: override the agent image with DD_AGENT_IMAGE env var.
+#
+# Usage: ansible-playbook -i inventory.yml install-datadog-agent.yml
+
+- name: Install Datadog agent on libvirt host
+  hosts: libvirt_hosts
+  gather_facts: false
+
+  vars_prompt:
+    - name: dd_api_key
+      prompt: "Datadog API key"
+      private: true
+    - name: dd_site
+      prompt: "Datadog site (e.g. us5.datadoghq.com)"
+      default: "us5.datadoghq.com"
+      private: false
+    - name: dd_env
+      prompt: "Datadog env tag"
+      default: "homelab"
+      private: false
+
+  vars:
+    dd_container_name: dd-agent
+    dd_config_dir: /etc/datadog-agent
+    dd_env_file: /etc/datadog-agent/container.env
+    dd_agent_image: "{{ lookup('env', 'DD_AGENT_IMAGE') | default('gcr.io/datadoghq/agent:7', true) }}"
+
+  tasks:
+    - name: Validate Datadog API key is provided
+      ansible.builtin.assert:
+        that:
+          - dd_api_key | length > 0
+        fail_msg: Datadog API key cannot be empty.
+
+    - name: Check if Datadog agent image is already present
+      ansible.builtin.command:
+        cmd: sudo podman image exists {{ dd_agent_image }}
+      register: dd_image_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Note image pull time on first install
+      ansible.builtin.debug:
+        msg:
+          - "Pulling {{ dd_agent_image }} on desktop-server..."
+          - "The Datadog agent image is large; first install often takes 2-5 minutes."
+          - "Ansible will report progress every 15 seconds until the pull finishes."
+      when: dd_image_exists.rc != 0
+
+    - name: Pull Datadog agent image
+      ansible.builtin.command:
+        cmd: sudo podman pull {{ dd_agent_image }}
+      async: 1800
+      poll: 15
+      when: dd_image_exists.rc != 0
+
+    - name: Note image already cached
+      ansible.builtin.debug:
+        msg: "Using cached image {{ dd_agent_image }} (skipping pull)."
+      when: dd_image_exists.rc == 0
+
+    - name: Create Datadog agent config directory
+      ansible.builtin.file:
+        path: "{{ dd_config_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Write Datadog agent environment file
+      ansible.builtin.copy:
+        dest: "{{ dd_env_file }}"
+        mode: "0600"
+        content: |
+          DD_API_KEY={{ dd_api_key }}
+          DD_SITE={{ dd_site }}
+          DD_ENV={{ dd_env }}
+          DD_PROCESS_AGENT_ENABLED=true
+          DD_CONTAINER_COLLECT_ALL=true
+          DD_DOGSTATSD_NON_LOCAL_TRAFFIC=true
+          DD_CONTAINER_RUNTIME_ENDPOINT=unix:///run/podman/podman.sock
+      no_log: true
+
+    - name: Create or replace Datadog agent container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ dd_container_name }}
+          --replace
+          --pull=never
+          --privileged
+          --net=host
+          --pid=host
+          --cgroupns=host
+          --restart=always
+          --env-file {{ dd_env_file }}
+          -v /run/podman/podman.sock:/var/run/docker.sock:ro
+          -v /proc/:/host/proc/:ro
+          -v /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+          {{ dd_agent_image }}
+      register: dd_agent_run
+      changed_when: dd_agent_run.rc == 0
+
+    - name: Wait for Datadog agent container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ dd_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 10
+      delay: 2
+      changed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "Datadog agent container deployed successfully!"
+          - ""
+          - "Container: {{ dd_container_name }}"
+          - "Image: {{ dd_agent_image }}"
+          - "Site: {{ dd_site }}"
+          - "Env: {{ dd_env }}"
+          - ""
+          - "Check status: sudo podman ps --filter name={{ dd_container_name }}"
+          - "View logs: sudo podman logs -f {{ dd_container_name }}"

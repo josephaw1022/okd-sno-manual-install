@@ -1,0 +1,15 @@
+---
+# Supplementary values for the community AWX Operator Helm chart.
+#
+# References:
+# - Chart docs and repo registration: https://ansible-community.github.io/awx-operator-helm/
+# - Source repo: https://github.com/ansible-community/awx-operator-helm
+#
+# Deploy operator only here; AWX custom resource stays in ansible/create-awx-instance.yml.
+
+operator-controller:
+  spec:
+    template:
+      spec:
+        # Chart default references RH catalog secrets; omit for OKD/community clusters.
+        imagePullSecrets: []
