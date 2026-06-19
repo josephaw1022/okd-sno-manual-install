@@ -567,6 +567,15 @@ install-gitops: ## Install OKD GitOps (ArgoCD).
 	@echo "✅ GitOps installed"
 
 
+.PHONY: install-cert-manager
+install-cert-manager: ## Install cert-manager operator (required by RabbitMQ topology operator).
+	@echo "📜 Installing cert-manager operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-cert-manager.yml && \
+	popd > /dev/null
+	@echo "✅ cert-manager operator installed"
+
+
 .PHONY: install-stolostron
 install-stolostron: ## Install Stolostron (Open Cluster Management / ACM).
 	@echo "🌐 Installing Stolostron (ACM)..."
@@ -724,3 +733,62 @@ create-awx-instance: ## Create an AWX instance for Ansible automation.
 	ansible-playbook -i inventory.yml create-awx-instance.yml && \
 	popd > /dev/null
 	@echo "✅ AWX instance created"
+
+
+##@ Developer Operators
+
+.PHONY: install-rabbitmq-topology-operator
+install-rabbitmq-topology-operator: ## Install RabbitMQ Messaging Topology Operator.
+	@echo "🐇 Installing RabbitMQ Messaging Topology Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-rabbitmq-topology-operator.yml && \
+	popd > /dev/null
+	@echo "✅ RabbitMQ Messaging Topology Operator installed"
+
+
+.PHONY: install-strimzi-kafka-operator
+install-strimzi-kafka-operator: ## Install Strimzi Kafka Operator.
+	@echo "🧵 Installing Strimzi Kafka Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-strimzi-kafka-operator.yml && \
+	popd > /dev/null
+	@echo "✅ Strimzi Kafka Operator installed"
+
+
+.PHONY: install-cloudnative-pg-operator
+install-cloudnative-pg-operator: ## Install CloudNativePG operator.
+	@echo "🐘 Installing CloudNativePG operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-cloudnative-pg-operator.yml && \
+	popd > /dev/null
+	@echo "✅ CloudNativePG operator installed"
+
+
+.PHONY: install-opstree-redis-operator
+install-opstree-redis-operator: ## Install Opstree Redis Operator.
+	@echo "🔴 Installing Opstree Redis Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-opstree-redis-operator.yml && \
+	popd > /dev/null
+	@echo "✅ Opstree Redis Operator installed"
+
+
+.PHONY: install-minio-operator
+install-minio-operator: ## Install MinIO Operator (upstream kustomize; not in OKD OperatorHub).
+	@echo "🪣 Installing MinIO Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-minio-operator.yml && \
+	popd > /dev/null
+	@echo "✅ MinIO Operator installed"
+
+
+.PHONY: install-developer-operators
+install-developer-operators: ## Install RabbitMQ, Strimzi, CloudNativePG, Opstree Redis, and MinIO operators in one run.
+	@echo "📦 Installing developer operators..."
+	@echo "   Prerequisite: run 'make install-cert-manager' first if RabbitMQ topology is not yet installed."
+	@$(MAKE) install-rabbitmq-topology-operator
+	@$(MAKE) install-strimzi-kafka-operator
+	@$(MAKE) install-cloudnative-pg-operator
+	@$(MAKE) install-opstree-redis-operator
+	@$(MAKE) install-minio-operator
+	@echo "✅ Developer operators installation complete"

@@ -1,0 +1,97 @@
+---
+# Ansible playbook to install RabbitMQ Messaging Topology Operator
+# Usage: ansible-playbook -i inventory.yml install-rabbitmq-topology-operator.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# This installs RabbitMQ Messaging Topology Operator from upstream release manifests.
+
+- name: Install RabbitMQ Messaging Topology Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    rabbitmq_topology_manifest_url: >-
+      {{
+        lookup('env', 'RABBITMQ_TOPOLOGY_MANIFEST_URL')
+        | default('https://github.com/rabbitmq/messaging-topology-operator/releases/latest/download/messaging-topology-operator-with-certmanager.yaml', true)
+      }}
+    rabbitmq_topology_namespace: "{{ lookup('env', 'RABBITMQ_TOPOLOGY_NAMESPACE') | default('rabbitmq-system', true) }}"
+    rabbitmq_topology_deployment: "{{ lookup('env', 'RABBITMQ_TOPOLOGY_DEPLOYMENT') | default('messaging-topology-operator', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Wait for cert-manager Certificate CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: certificates.cert-manager.io
+      register: cert_manager_certificate_crd
+      until: cert_manager_certificate_crd.resources | length > 0
+      retries: 60
+      delay: 5
+
+    - name: Wait for cert-manager Issuer CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: issuers.cert-manager.io
+      register: cert_manager_issuer_crd
+      until: cert_manager_issuer_crd.resources | length > 0
+      retries: 60
+      delay: 5
+
+    - name: Fail if cert-manager CRDs are missing
+      ansible.builtin.fail:
+        msg: |
+          cert-manager CRDs are not available.
+          Run 'make install-cert-manager' first and retry.
+      when: cert_manager_certificate_crd.resources | length == 0 or cert_manager_issuer_crd.resources | length == 0
+
+    - name: Apply RabbitMQ topology operator manifest
+      ansible.builtin.command:
+        cmd: oc apply -f {{ rabbitmq_topology_manifest_url }}
+      register: rabbitmq_topology_apply
+      changed_when: false
+
+    - name: Wait for RabbitMQ topology operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ rabbitmq_topology_deployment }}"
+        namespace: "{{ rabbitmq_topology_namespace }}"
+      register: rabbitmq_topology_deployment_status
+      until: >
+        rabbitmq_topology_deployment_status.resources | length > 0 and
+        rabbitmq_topology_deployment_status.resources[0].status is defined and
+        rabbitmq_topology_deployment_status.resources[0].status.readyReplicas is defined and
+        rabbitmq_topology_deployment_status.resources[0].status.readyReplicas >= 1
+      retries: 90
+      delay: 10
+      failed_when: false
+
+    - name: Display RabbitMQ topology operator status
+      ansible.builtin.debug:
+        msg:
+          - "✅ RabbitMQ Messaging Topology Operator installed successfully!"
+          - ""
+          - "📋 Namespace: {{ rabbitmq_topology_namespace }}"
+          - "📋 Deployment: {{ rabbitmq_topology_deployment }}"
+          - "📋 Manifest URL: {{ rabbitmq_topology_manifest_url }}"

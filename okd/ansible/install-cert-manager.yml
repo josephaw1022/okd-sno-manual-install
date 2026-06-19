@@ -1,0 +1,142 @@
+---
+# Ansible playbook to install cert-manager operator
+# Usage: ansible-playbook -i inventory.yml install-cert-manager.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# cert-manager provides Certificate/Issuer CRDs used by multiple operators.
+
+- name: Install cert-manager operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cert_manager_namespace: "{{ lookup('env', 'CERT_MANAGER_NAMESPACE') | default('cert-manager-operator', true) }}"
+    cert_manager_operatorgroup_name: "{{ lookup('env', 'CERT_MANAGER_OPERATORGROUP_NAME') | default('cert-manager-operatorgroup', true) }}"
+    cert_manager_channel: "{{ lookup('env', 'CERT_MANAGER_CHANNEL') | default('stable', true) }}"
+    cert_manager_source: "{{ lookup('env', 'CERT_MANAGER_SOURCE') | default('community-operators', true) }}"
+    cert_manager_subscription_name: "{{ lookup('env', 'CERT_MANAGER_SUBSCRIPTION_NAME') | default('cert-manager', true) }}"
+    cert_manager_package_name: "{{ lookup('env', 'CERT_MANAGER_PACKAGE_NAME') | default('cert-manager', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure cert-manager operator namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ cert_manager_namespace }}"
+
+    - name: Get existing cert-manager OperatorGroup
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        name: "{{ cert_manager_operatorgroup_name }}"
+        namespace: "{{ cert_manager_namespace }}"
+      register: cert_manager_operatorgroup_info
+      failed_when: false
+
+    - name: Remove cert-manager OperatorGroup if scoped to own namespace
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        name: "{{ cert_manager_operatorgroup_name }}"
+        namespace: "{{ cert_manager_namespace }}"
+        state: absent
+      when: >
+        cert_manager_operatorgroup_info.resources | length > 0 and
+        cert_manager_operatorgroup_info.resources[0].spec is defined and
+        cert_manager_operatorgroup_info.resources[0].spec.targetNamespaces is defined and
+        cert_manager_operatorgroup_info.resources[0].spec.targetNamespaces | length > 0
+
+    - name: Ensure OperatorGroup for cert-manager exists in AllNamespaces mode
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: "{{ cert_manager_operatorgroup_name }}"
+            namespace: "{{ cert_manager_namespace }}"
+          spec: {}
+
+    - name: Ensure cert-manager subscription exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: "{{ cert_manager_subscription_name }}"
+            namespace: "{{ cert_manager_namespace }}"
+          spec:
+            channel: "{{ cert_manager_channel }}"
+            installPlanApproval: Automatic
+            name: "{{ cert_manager_package_name }}"
+            source: "{{ cert_manager_source }}"
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for cert-manager operator CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ cert_manager_namespace }}"
+      register: cert_manager_csv_status
+      until: >
+        cert_manager_csv_status.resources | length > 0 and
+        cert_manager_csv_status.resources
+        | selectattr('metadata.name', 'search', 'cert-manager')
+        | selectattr('status.phase', 'defined')
+        | selectattr('status.phase', 'equalto', 'Succeeded')
+        | list | length > 0
+      retries: 90
+      delay: 10
+      failed_when: false
+
+    - name: Wait for cert-manager Certificate CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: certificates.cert-manager.io
+      register: cert_manager_certificate_crd
+      until: cert_manager_certificate_crd.resources | length > 0
+      retries: 60
+      delay: 5
+
+    - name: Wait for cert-manager Issuer CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: issuers.cert-manager.io
+      register: cert_manager_issuer_crd
+      until: cert_manager_issuer_crd.resources | length > 0
+      retries: 60
+      delay: 5
+
+    - name: Display cert-manager installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ cert-manager installed successfully!"
+          - ""
+          - "📋 Namespace: {{ cert_manager_namespace }}"
+          - "📋 Channel: {{ cert_manager_channel }}"
+          - "📋 Package: {{ cert_manager_package_name }}"

@@ -1,0 +1,181 @@
+---
+# Ansible playbook to install CloudNativePG operator
+# Usage: ansible-playbook -i inventory.yml install-cloudnative-pg-operator.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# CloudNativePG is installed from upstream release manifests (not in community-operators on OKD).
+# OpenShift requires a custom SCC for the upstream controller UID/GID 10001.
+
+- name: Install CloudNativePG operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cnpg_manifest_url: >-
+      {{
+        lookup('env', 'CNPG_MANIFEST_URL')
+        | default('https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.29.1/cnpg-1.29.1.yaml', true)
+      }}
+    cnpg_namespace: "{{ lookup('env', 'CNPG_NAMESPACE') | default('cnpg-system', true) }}"
+    cnpg_deployment: "{{ lookup('env', 'CNPG_DEPLOYMENT') | default('cnpg-controller-manager', true) }}"
+    cnpg_scc_name: "{{ lookup('env', 'CNPG_SCC_NAME') | default('cnpg-operator', true) }}"
+    cnpg_service_account: "{{ lookup('env', 'CNPG_SERVICE_ACCOUNT') | default('cnpg-manager', true) }}"
+    cnpg_run_as_uid: "{{ lookup('env', 'CNPG_RUN_AS_UID') | default('10001', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Apply CloudNativePG operator manifest
+      ansible.builtin.command:
+        cmd: oc apply --server-side -f {{ cnpg_manifest_url }}
+      register: cnpg_apply
+      changed_when: false
+
+    - name: Get existing CloudNativePG operator SCC runAsUser UID
+      ansible.builtin.command:
+        cmd: oc get scc {{ cnpg_scc_name }} -o jsonpath={.runAsUser.uid}
+      register: cnpg_existing_scc_uid
+      changed_when: false
+      failed_when: false
+
+    - name: Remove broken CloudNativePG operator SCC
+      ansible.builtin.command:
+        cmd: oc delete scc {{ cnpg_scc_name }} --interactive=false --ignore-not-found=true
+      register: cnpg_scc_delete
+      changed_when: "'deleted' in cnpg_scc_delete.stdout"
+      when: >
+        cnpg_existing_scc_uid.rc == 0 and
+        (cnpg_existing_scc_uid.stdout | trim) != (cnpg_run_as_uid | string)
+
+    - name: Ensure CloudNativePG operator SCC exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        oc apply -f - <<EOF
+        apiVersion: security.openshift.io/v1
+        kind: SecurityContextConstraints
+        metadata:
+          name: {{ cnpg_scc_name }}
+          annotations:
+            kubernetes.io/description: >-
+              SCC for CloudNativePG operator controller on OpenShift.
+              Allows the upstream operator UID/GID 10001 required by cnpg-controller-manager.
+        allowHostDirVolumePlugin: false
+        allowHostIPC: false
+        allowHostNetwork: false
+        allowHostPID: false
+        allowHostPorts: false
+        allowPrivilegeEscalation: false
+        allowPrivilegedContainer: false
+        allowedCapabilities: []
+        defaultAddCapabilities: []
+        requiredDropCapabilities:
+          - ALL
+        fsGroup:
+          type: MustRunAs
+          ranges:
+            - min: 10001
+              max: 10001
+        runAsUser:
+          type: MustRunAs
+          uid: {{ cnpg_run_as_uid }}
+        seLinuxContext:
+          type: MustRunAs
+        supplementalGroups:
+          type: RunAsAny
+        users: []
+        groups: []
+        volumes:
+          - configMap
+          - downwardAPI
+          - emptyDir
+          - persistentVolumeClaim
+          - projected
+          - secret
+        EOF
+      args:
+        executable: /bin/bash
+      register: cnpg_scc_apply
+      changed_when: "'configured' in cnpg_scc_apply.stdout or 'created' in cnpg_scc_apply.stdout"
+      when: >
+        cnpg_existing_scc_uid.rc != 0 or
+        (cnpg_existing_scc_uid.stdout | trim) != (cnpg_run_as_uid | string) or
+        cnpg_scc_delete.changed | default(false)
+
+    - name: Ensure CloudNativePG operator SCC binding exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: cnpg-operator-scc
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: "system:openshift:scc:{{ cnpg_scc_name }}"
+          subjects:
+            - kind: ServiceAccount
+              name: "{{ cnpg_service_account }}"
+              namespace: "{{ cnpg_namespace }}"
+      register: cnpg_scc_binding
+
+    - name: Restart CloudNativePG controller after SCC binding
+      ansible.builtin.command:
+        cmd: oc rollout restart deployment/{{ cnpg_deployment }} -n {{ cnpg_namespace }}
+      register: cnpg_rollout_restart
+      changed_when: "'restarted' in cnpg_rollout_restart.stdout"
+      failed_when: false
+      when: cnpg_scc_apply.changed | default(false) or cnpg_scc_binding.changed | default(false) or cnpg_scc_delete.changed | default(false)
+
+    - name: Wait for CloudNativePG operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ cnpg_deployment }}"
+        namespace: "{{ cnpg_namespace }}"
+      register: cnpg_deployment_status
+      until: >
+        cnpg_deployment_status.resources | length > 0 and
+        cnpg_deployment_status.resources[0].status is defined and
+        cnpg_deployment_status.resources[0].status.readyReplicas is defined and
+        cnpg_deployment_status.resources[0].status.readyReplicas >= 1
+      retries: 30
+      delay: 5
+      failed_when: false
+
+    - name: Fail if CloudNativePG operator deployment is not ready
+      ansible.builtin.fail:
+        msg: |
+          CloudNativePG operator deployment is not ready.
+          Check: oc describe deploy {{ cnpg_deployment }} -n {{ cnpg_namespace }}
+          Check: oc get events -n {{ cnpg_namespace }} --sort-by=.lastTimestamp
+      when: >
+        cnpg_deployment_status.resources | length == 0 or
+        cnpg_deployment_status.resources[0].status.readyReplicas | default(0) < 1
+
+    - name: Display CloudNativePG installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ CloudNativePG operator installed successfully!"
+          - ""
+          - "📋 Namespace: {{ cnpg_namespace }}"
+          - "📋 Deployment: {{ cnpg_deployment }}"
+          - "📋 SCC: {{ cnpg_scc_name }}"
+          - "📋 Manifest URL: {{ cnpg_manifest_url }}"

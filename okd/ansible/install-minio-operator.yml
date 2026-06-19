@@ -1,0 +1,175 @@
+---
+# Ansible playbook to install MinIO Operator
+# Usage: ansible-playbook -i inventory.yml install-minio-operator.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# MinIO Operator is not in community-operators on OKD 4.17+.
+# Installed from upstream kustomize: https://github.com/minio/operator
+# OpenShift requires a custom SCC for the upstream controller UID/GID 1000.
+
+- name: Install MinIO Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    minio_operator_ref: "{{ lookup('env', 'MINIO_OPERATOR_REF') | default('v7.1.1', true) }}"
+    minio_operator_namespace: "{{ lookup('env', 'MINIO_OPERATOR_NAMESPACE') | default('minio-operator', true) }}"
+    minio_operator_deployment: "{{ lookup('env', 'MINIO_OPERATOR_DEPLOYMENT') | default('minio-operator', true) }}"
+    minio_scc_name: "{{ lookup('env', 'MINIO_SCC_NAME') | default('minio-operator', true) }}"
+    minio_service_account: "{{ lookup('env', 'MINIO_SERVICE_ACCOUNT') | default('minio-operator', true) }}"
+    minio_run_as_uid: "{{ lookup('env', 'MINIO_RUN_AS_UID') | default('1000', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Apply MinIO operator kustomize manifest
+      ansible.builtin.shell: |
+        set -euo pipefail
+        oc kustomize "github.com/minio/operator?ref={{ minio_operator_ref }}" | oc apply -f -
+      args:
+        executable: /bin/bash
+      register: minio_operator_apply
+      changed_when: false
+
+    - name: Get existing MinIO operator SCC runAsUser UID
+      ansible.builtin.command:
+        cmd: oc get scc {{ minio_scc_name }} -o jsonpath={.runAsUser.uid}
+      register: minio_existing_scc_uid
+      changed_when: false
+      failed_when: false
+
+    - name: Remove broken MinIO operator SCC
+      ansible.builtin.command:
+        cmd: oc delete scc {{ minio_scc_name }} --interactive=false --ignore-not-found=true
+      register: minio_scc_delete
+      changed_when: "'deleted' in minio_scc_delete.stdout"
+      when: >
+        minio_existing_scc_uid.rc == 0 and
+        (minio_existing_scc_uid.stdout | trim) != (minio_run_as_uid | string)
+
+    - name: Ensure MinIO operator SCC exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        oc apply -f - <<EOF
+        apiVersion: security.openshift.io/v1
+        kind: SecurityContextConstraints
+        metadata:
+          name: {{ minio_scc_name }}
+          annotations:
+            kubernetes.io/description: >-
+              SCC for MinIO operator controller on OpenShift.
+              Allows the upstream operator UID/GID 1000 required by minio-operator.
+        allowHostDirVolumePlugin: false
+        allowHostIPC: false
+        allowHostNetwork: false
+        allowHostPID: false
+        allowHostPorts: false
+        allowPrivilegeEscalation: false
+        allowPrivilegedContainer: false
+        allowedCapabilities: []
+        defaultAddCapabilities: []
+        requiredDropCapabilities:
+          - ALL
+        fsGroup:
+          type: MustRunAs
+          ranges:
+            - min: {{ minio_run_as_uid }}
+              max: {{ minio_run_as_uid }}
+        runAsUser:
+          type: MustRunAs
+          uid: {{ minio_run_as_uid }}
+        seLinuxContext:
+          type: MustRunAs
+        seccompProfiles:
+          - runtime/default
+        supplementalGroups:
+          type: RunAsAny
+        users: []
+        groups: []
+        volumes:
+          - configMap
+          - downwardAPI
+          - emptyDir
+          - persistentVolumeClaim
+          - projected
+          - secret
+        EOF
+      args:
+        executable: /bin/bash
+      register: minio_scc_apply
+      changed_when: "'configured' in minio_scc_apply.stdout or 'created' in minio_scc_apply.stdout"
+      when: >
+        minio_existing_scc_uid.rc != 0 or
+        (minio_existing_scc_uid.stdout | trim) != (minio_run_as_uid | string) or
+        minio_scc_delete.changed | default(false)
+
+    - name: Grant MinIO operator service account access to SCC
+      ansible.builtin.command:
+        cmd: oc adm policy add-scc-to-user {{ minio_scc_name }} -z {{ minio_service_account }} -n {{ minio_operator_namespace }}
+      register: minio_scc_grant
+      changed_when: "'added' in minio_scc_grant.stdout"
+      failed_when: false
+
+    - name: Restart MinIO operator after SCC binding
+      ansible.builtin.command:
+        cmd: oc rollout restart deployment/{{ minio_operator_deployment }} -n {{ minio_operator_namespace }}
+      register: minio_rollout_restart
+      changed_when: "'restarted' in minio_rollout_restart.stdout"
+      failed_when: false
+      when: >
+        minio_scc_apply.changed | default(false) or
+        minio_scc_grant.changed | default(false) or
+        minio_scc_delete.changed | default(false)
+
+    - name: Wait for MinIO operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ minio_operator_deployment }}"
+        namespace: "{{ minio_operator_namespace }}"
+      register: minio_operator_deployment_status
+      until: >
+        minio_operator_deployment_status.resources | length > 0 and
+        minio_operator_deployment_status.resources[0].status is defined and
+        minio_operator_deployment_status.resources[0].status.readyReplicas is defined and
+        minio_operator_deployment_status.resources[0].status.readyReplicas >= 1
+      retries: 30
+      delay: 5
+      failed_when: false
+
+    - name: Fail if MinIO operator deployment is not ready
+      ansible.builtin.fail:
+        msg: |
+          MinIO operator deployment is not ready.
+          Check: oc describe deploy {{ minio_operator_deployment }} -n {{ minio_operator_namespace }}
+          Check: oc get events -n {{ minio_operator_namespace }} --sort-by=.lastTimestamp
+      when: >
+        minio_operator_deployment_status.resources | length == 0 or
+        minio_operator_deployment_status.resources[0].status.readyReplicas | default(0) < 1
+
+    - name: Display MinIO operator installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ MinIO Operator installed successfully!"
+          - ""
+          - "📋 Namespace: {{ minio_operator_namespace }}"
+          - "📋 Deployment: {{ minio_operator_deployment }}"
+          - "📋 SCC: {{ minio_scc_name }}"
+          - "📋 Ref: {{ minio_operator_ref }}"

@@ -1,0 +1,130 @@
+---
+# Ansible playbook to install Strimzi Kafka Operator
+# Usage: ansible-playbook -i inventory.yml install-strimzi-kafka-operator.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# Strimzi provides an operator-managed Apache Kafka platform on Kubernetes/OpenShift.
+
+- name: Install Strimzi Kafka Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    strimzi_namespace: "{{ lookup('env', 'STRIMZI_NAMESPACE') | default('strimzi-kafka', true) }}"
+    strimzi_channel: "{{ lookup('env', 'STRIMZI_CHANNEL') | default('stable', true) }}"
+    strimzi_source: "{{ lookup('env', 'STRIMZI_SOURCE') | default('community-operators', true) }}"
+    strimzi_subscription_name: "{{ lookup('env', 'STRIMZI_SUBSCRIPTION_NAME') | default('strimzi-kafka-operator', true) }}"
+    strimzi_package_name: "{{ lookup('env', 'STRIMZI_PACKAGE_NAME') | default('strimzi-kafka-operator', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Strimzi namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ strimzi_namespace }}"
+
+    - name: Ensure OperatorGroup for Strimzi exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: strimzi-operatorgroup
+            namespace: "{{ strimzi_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ strimzi_namespace }}"
+
+    - name: Ensure Strimzi subscription exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: "{{ strimzi_subscription_name }}"
+            namespace: "{{ strimzi_namespace }}"
+          spec:
+            channel: "{{ strimzi_channel }}"
+            installPlanApproval: Automatic
+            name: "{{ strimzi_package_name }}"
+            source: "{{ strimzi_source }}"
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for Strimzi operator CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ strimzi_namespace }}"
+      register: strimzi_csv_status
+      until: >
+        strimzi_csv_status.resources | length > 0 and
+        strimzi_csv_status.resources
+        | selectattr('metadata.name', 'search', 'strimzi')
+        | selectattr('status.phase', 'defined')
+        | selectattr('status.phase', 'equalto', 'Succeeded')
+        | list | length > 0
+      retries: 90
+      delay: 10
+      failed_when: false
+
+    - name: Check Strimzi operator CSV status
+      ansible.builtin.debug:
+        msg: >-
+          Strimzi CSV status:
+          {{
+            strimzi_csv_status.resources
+            | selectattr('metadata.name', 'search', 'strimzi')
+            | map(attribute='status.phase')
+            | list
+          }}
+      when: strimzi_csv_status.resources | length > 0
+
+    - name: Wait for Strimzi operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ strimzi_namespace }}"
+      register: strimzi_deployments
+      until: >
+        strimzi_deployments.resources | length > 0 and
+        strimzi_deployments.resources
+        | selectattr('metadata.name', 'search', 'strimzi')
+        | selectattr('status.readyReplicas', 'defined')
+        | selectattr('status.readyReplicas', 'ge', 1)
+        | list | length > 0
+      retries: 90
+      delay: 10
+      failed_when: false
+
+    - name: Display Strimzi installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Strimzi Kafka Operator installed successfully!"
+          - ""
+          - "📋 Namespace: {{ strimzi_namespace }}"
+          - "📋 Channel: {{ strimzi_channel }}"
+          - "📋 Package: {{ strimzi_package_name }}"

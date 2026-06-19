@@ -1,0 +1,118 @@
+---
+# Ansible playbook to install Opstree Redis Operator
+# Usage: ansible-playbook -i inventory.yml install-opstree-redis-operator.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#
+# Opstree Redis Operator is available from community-operators as redis-operator.
+
+- name: Install Opstree Redis Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    redis_namespace: "{{ lookup('env', 'REDIS_OPERATOR_NAMESPACE') | default('redis-operator', true) }}"
+    redis_channel: "{{ lookup('env', 'REDIS_OPERATOR_CHANNEL') | default('stable', true) }}"
+    redis_source: "{{ lookup('env', 'REDIS_OPERATOR_SOURCE') | default('community-operators', true) }}"
+    redis_subscription_name: "{{ lookup('env', 'REDIS_OPERATOR_SUBSCRIPTION_NAME') | default('redis-operator', true) }}"
+    redis_package_name: "{{ lookup('env', 'REDIS_OPERATOR_PACKAGE_NAME') | default('redis-operator', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Redis operator namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ redis_namespace }}"
+
+    - name: Ensure OperatorGroup for Redis operator exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: redis-operatorgroup
+            namespace: "{{ redis_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ redis_namespace }}"
+
+    - name: Ensure Redis operator subscription exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: "{{ redis_subscription_name }}"
+            namespace: "{{ redis_namespace }}"
+          spec:
+            channel: "{{ redis_channel }}"
+            installPlanApproval: Automatic
+            name: "{{ redis_package_name }}"
+            source: "{{ redis_source }}"
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for Redis operator CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ redis_namespace }}"
+      register: redis_csv_status
+      until: >
+        redis_csv_status.resources | length > 0 and
+        redis_csv_status.resources
+        | selectattr('metadata.name', 'search', 'redis-operator')
+        | selectattr('status.phase', 'defined')
+        | selectattr('status.phase', 'equalto', 'Succeeded')
+        | list | length > 0
+      retries: 60
+      delay: 5
+      failed_when: false
+
+    - name: Wait for Redis operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ redis_namespace }}"
+      register: redis_deployments
+      until: >
+        redis_deployments.resources | length > 0 and
+        redis_deployments.resources
+        | selectattr('metadata.name', 'search', 'redis')
+        | selectattr('status.readyReplicas', 'defined')
+        | selectattr('status.readyReplicas', 'ge', 1)
+        | list | length > 0
+      retries: 60
+      delay: 5
+      failed_when: false
+
+    - name: Display Redis operator installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Opstree Redis Operator installed successfully!"
+          - ""
+          - "📋 Namespace: {{ redis_namespace }}"
+          - "📋 Channel: {{ redis_channel }}"
+          - "📋 Package: {{ redis_package_name }}"
