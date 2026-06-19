@@ -8,7 +8,7 @@ apiVersion: lvm.topolvm.io/v1alpha1
 kind: LVMCluster
 metadata:
   name: lvmcluster-block
-  namespace: openshift-storage
+  namespace: openshift-lvm-storage
 spec:
   storage:
     deviceClasses:
