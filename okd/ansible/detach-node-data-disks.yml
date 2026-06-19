@@ -1,0 +1,33 @@
+---
+# Detach vdb from each master VM (if present).
+
+- name: Detach per-node data disks from master VMs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    vm_list:
+      - "{{ cluster_name }}-master-0"
+      - "{{ cluster_name }}-master-1"
+      - "{{ cluster_name }}-master-2"
+
+  tasks:
+    - name: Detach vdb when attached
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+
+          VM="{{ item }}"
+          if ! virsh dominfo "$VM" >/dev/null 2>&1; then
+            echo "SKIP: VM $VM does not exist"
+            exit 0
+          fi
+
+          if virsh domblklist "$VM" --details | awk '$3 == "vdb" { found=1 } END { exit found ? 0 : 1 }'; then
+            virsh detach-disk "$VM" vdb --persistent
+            echo "DETACHED: $VM:vdb"
+          else
+            echo "SKIP: $VM has no vdb attached"
+          fi
+      loop: "{{ vm_list }}"
+      changed_when: "'DETACHED:' in (stdout | default(''))"

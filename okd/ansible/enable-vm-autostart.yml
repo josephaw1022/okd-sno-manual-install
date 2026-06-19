@@ -1,0 +1,25 @@
+---
+# Enable autostart for currently running OKD master VMs.
+
+- name: Enable autostart for running OKD node VMs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    vm_candidates:
+      - "{{ cluster_name }}-master-0"
+      - "{{ cluster_name }}-master-1"
+      - "{{ cluster_name }}-master-2"
+
+  tasks:
+    - name: Get running VMs
+      ansible.builtin.command:
+        cmd: virsh list --state-running --name
+      register: running_vms
+      changed_when: false
+
+    - name: Enable autostart for running OKD master VMs
+      ansible.builtin.command:
+        cmd: virsh autostart {{ item }}
+      loop: "{{ vm_candidates }}"
+      when: item in running_vms.stdout_lines

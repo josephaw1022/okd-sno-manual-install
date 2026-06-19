@@ -23,6 +23,9 @@ GATEWAY_IP ?= 192.168.1.1
 VM_CPUS ?= 4
 VM_MEMORY ?= 41984
 VM_DISK_SIZE ?= 120
+NODE_DATA_DISK_SIZE_GB ?= 200
+NODE_DATA_DISK_ALLOCATION_GB ?= 1
+NODE_DATA_POOL ?= okd-storage
 
 # Remote server settings
 SERVER_HOST ?= 192.168.1.9
@@ -328,6 +331,56 @@ destroy-vms: ## Destroy all VMs and delete disk images via Ansible.
 	@echo "✅ VMs destroyed"
 
 
+.PHONY: cleanup-non-qcow-volumes
+cleanup-non-qcow-volumes: ## Delete non-qcow2 and non-agent-ISO volumes from the default libvirt pool.
+	@echo "🧹 Removing non-qcow2 and non-agent-ISO volumes..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml cleanup-non-qcow-volumes.yml && \
+	popd > /dev/null
+	@echo "✅ Volume cleanup complete"
+
+
+.PHONY: create-node-data-disks
+create-node-data-disks: ## Create one raw data volume (node-0..node-2) in libvirt for each node.
+	@echo "💾 Creating per-node data volumes in pool $(NODE_DATA_POOL) (size: $(NODE_DATA_DISK_SIZE_GB)G, allocation: $(NODE_DATA_DISK_ALLOCATION_GB)G)..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-node-data-disks.yml \
+	  -e "pool_name=$(NODE_DATA_POOL)" \
+	  -e "node_data_disk_size_gb=$(NODE_DATA_DISK_SIZE_GB)" \
+	  -e "node_data_disk_allocation_gb=$(NODE_DATA_DISK_ALLOCATION_GB)" && \
+	popd > /dev/null
+	@echo "✅ Per-node data volumes created"
+
+
+.PHONY: delete-node-data-disks
+delete-node-data-disks: ## Delete node-0..node-2 volumes from the selected libvirt pool.
+	@echo "🗑️ Deleting per-node data volumes from pool $(NODE_DATA_POOL)..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml delete-node-data-disks.yml \
+	  -e "pool_name=$(NODE_DATA_POOL)" && \
+	popd > /dev/null
+	@echo "✅ Per-node data volumes deleted (if present)"
+
+
+.PHONY: detach-node-data-disks
+detach-node-data-disks: ## Detach vdb from master VMs (if attached).
+	@echo "🔌 Detaching per-node data volumes from VMs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml detach-node-data-disks.yml && \
+	popd > /dev/null
+	@echo "✅ Data volumes detached from VMs (if present)"
+
+
+.PHONY: attach-node-data-disks
+attach-node-data-disks: ## Attach node-0..node-2 volumes to master VMs as vdb.
+	@echo "🔌 Attaching per-node data volumes from pool $(NODE_DATA_POOL) to VMs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml attach-node-data-disks.yml \
+	  -e "pool_name=$(NODE_DATA_POOL)" && \
+	popd > /dev/null
+	@echo "✅ Data volumes attached to VMs"
+
+
 .PHONY: start-vms
 start-vms: ## Start all stopped VMs on the libvirt server via Ansible.
 	@echo "▶️ Starting all stopped VMs..."
@@ -335,6 +388,15 @@ start-vms: ## Start all stopped VMs on the libvirt server via Ansible.
 	ansible-playbook -i inventory.yml start-vms.yml && \
 	popd > /dev/null
 	@echo "✅ VMs started"
+
+
+.PHONY: enable-vm-autostart
+enable-vm-autostart: ## Enable autostart for currently running OKD master VMs.
+	@echo "🔁 Enabling autostart for running OKD master VMs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml enable-vm-autostart.yml && \
+	popd > /dev/null
+	@echo "✅ Autostart enabled for running OKD master VMs"
 
 
 .PHONY: reboot-non-bootstrap
@@ -539,6 +601,29 @@ install-local-storage: ## Install Local Storage Operator with hostpath storage c
 	ansible-playbook -i inventory.yml install-local-storage.yml && \
 	popd > /dev/null
 	@echo "✅ Local Storage Operator installed"
+
+
+# LVMS bundle tag override (auto-selected from cluster version when unset).
+LVMS_BUNDLE_TAG ?=
+
+.PHONY: install-lvms
+install-lvms: ## Install LVMS (LVM Storage) operator without OKDerators catalog.
+	@if ! command -v operator-sdk >/dev/null 2>&1; then \
+	  echo "❌ operator-sdk is not installed. Install operator-sdk and retry."; \
+	  exit 1; \
+	fi
+	@echo "💾 Installing LVMS (LVM Storage) operator..."
+	@pushd ansible > /dev/null && \
+	LVMS_BUNDLE_TAG="$(LVMS_BUNDLE_TAG)" ansible-playbook -i inventory.yml install-lvms.yml && \
+	popd > /dev/null
+	@echo "✅ LVMS operator installed"
+
+
+.PHONY: create-lvms-cluster
+create-lvms-cluster: ## Create LVMCluster CR for dynamic local storage (/dev/vdb on masters).
+	@echo "💾 Creating LVMCluster..."
+	@bash cluster-setup/create-lvms-cluster.sh
+	@echo "✅ LVMCluster created"
 
 
 # AWX Operator (Helm chart: https://ansible-community.github.io/awx-operator-helm/)

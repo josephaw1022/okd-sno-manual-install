@@ -1,0 +1,46 @@
+---
+# Attach one node data volume to each master VM as vdb.
+
+- name: Attach per-node data volumes to master VMs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    pool_name: default
+    vm_volume_map:
+      - vm: "{{ cluster_name }}-master-0"
+        volume: node-0
+      - vm: "{{ cluster_name }}-master-1"
+        volume: node-1
+      - vm: "{{ cluster_name }}-master-2"
+        volume: node-2
+
+  tasks:
+    - name: Attach node volume to VM as vdb when not already attached
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+
+          VM="{{ item.vm }}"
+          VOLUME="{{ item.volume }}"
+
+          if ! virsh dominfo "$VM" >/dev/null 2>&1; then
+            echo "SKIP: VM $VM does not exist"
+            exit 0
+          fi
+
+          if ! virsh vol-info --pool {{ pool_name }} "$VOLUME" >/dev/null 2>&1; then
+            echo "SKIP: volume $VOLUME does not exist in pool {{ pool_name }}"
+            exit 0
+          fi
+
+          if virsh domblklist "$VM" --details | awk '$3 == "vdb" { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "SKIP: $VM already has vdb attached"
+            exit 0
+          fi
+
+          VOLUME_PATH="$(virsh vol-path --pool {{ pool_name }} "$VOLUME")"
+          virsh attach-disk "$VM" "$VOLUME_PATH" vdb --targetbus virtio --persistent
+          echo "ATTACHED: $VOLUME_PATH -> $VM:vdb"
+      loop: "{{ vm_volume_map }}"
+      changed_when: "'ATTACHED:' in (stdout | default(''))"

@@ -1,0 +1,42 @@
+---
+# Remove non-qcow2 volumes from the libvirt pool, excluding the agent ISO.
+
+- name: Remove non-qcow2 volumes except agent ISO
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    pool_name: default
+    agent_iso: agent.x86_64.iso
+    protected_volumes:
+      - "{{ agent_iso }}"
+      - okd-data
+
+  tasks:
+    - name: List volumes in libvirt pool
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          virsh vol-list --pool {{ pool_name }} | awk 'NR > 2 && $1 != "" { print $1 }'
+      register: pool_volumes
+      changed_when: false
+
+    - name: Delete non-qcow2 and non-agent-ISO volumes
+      ansible.builtin.command:
+        cmd: virsh vol-delete --pool {{ pool_name }} {{ item }}
+      loop: "{{ pool_volumes.stdout_lines }}"
+      register: delete_results
+      failed_when: false
+      changed_when: false
+      when:
+        - item | trim != ""
+        - item not in protected_volumes
+        - not item.endswith('.qcow2')
+
+    - name: Warn about non-deleted volumes
+      ansible.builtin.debug:
+        msg: "⚠️ Could not delete volume {{ item.item }}: {{ item.stderr | default('unknown error') }}"
+      loop: "{{ delete_results.results | default([]) }}"
+      when:
+        - item is defined
+        - item.rc is defined
+        - item.rc != 0

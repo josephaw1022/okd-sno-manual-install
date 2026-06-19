@@ -1,0 +1,27 @@
+---
+# Delete per-node data volumes from a specific libvirt pool.
+
+- name: Delete per-node data volumes
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    pool_name: okd-storage
+    node_data_volumes:
+      - node-0
+      - node-1
+      - node-2
+
+  tasks:
+    - name: List existing volumes in pool
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          virsh vol-list --pool {{ pool_name }} | awk 'NR > 2 && $1 != "" { print $1 }'
+      register: pool_volumes
+      changed_when: false
+
+    - name: Delete node data volumes from pool
+      ansible.builtin.command:
+        cmd: virsh vol-delete --pool {{ pool_name }} {{ item }}
+      loop: "{{ node_data_volumes }}"
+      when: item in pool_volumes.stdout_lines

@@ -1,0 +1,154 @@
+---
+# Ansible playbook to install LVMS (LVM Storage Operator) on OKD
+# Usage: ansible-playbook -i inventory.yml install-lvms.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#   - operator-sdk CLI installed locally
+#
+# Installs LVMS from the public OKDerators-built bundle image on quay.io.
+# This does NOT install the OKDerators catalog source.
+
+- name: Install LVMS (LVM Storage Operator)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    lvms_namespace: openshift-lvm-storage
+    lvms_bundle_image_base: quay.io/okderators/lvms/operator-bundle
+    lvms_bundle_tag: "{{ lookup('env', 'LVMS_BUNDLE_TAG') | default('', true) }}"
+    lvms_bundle_map:
+      "4.15": "4.18.0-2025-05-09-030805"
+      "4.16": "4.18.0-2025-05-09-030805"
+      "4.17": "4.18.0-2025-05-09-030805"
+      "4.18": "4.18.0-2025-05-09-030805"
+      "4.19": "4.19.0-2025-08-26-154615"
+      "4.20": "4.20.0-2025-11-01-182956"
+      "4.21": "4.21.0-2026-05-12-144011"
+      "4.22": "4.21.0-2026-05-12-144011"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Check operator-sdk is installed
+      ansible.builtin.command: operator-sdk version
+      register: operator_sdk_check
+      changed_when: false
+      failed_when: operator_sdk_check.rc != 0
+
+    - name: Get cluster version
+      ansible.builtin.command:
+        cmd: oc get clusterversion version -o jsonpath={.status.desired.version}
+      register: cluster_version
+      changed_when: false
+      when: lvms_bundle_tag == ''
+
+    - name: Set LVMS bundle tag from cluster version
+      ansible.builtin.set_fact:
+        lvms_bundle_tag: "{{ lvms_bundle_map[cluster_version.stdout.split('.')[0] + '.' + cluster_version.stdout.split('.')[1]] | default('4.21.0-2026-05-12-144011') }}"
+      when: lvms_bundle_tag == ''
+
+    - name: Set LVMS bundle image
+      ansible.builtin.set_fact:
+        lvms_bundle_image: "{{ lvms_bundle_image_base }}:{{ lvms_bundle_tag }}"
+
+    - name: Display selected LVMS bundle
+      ansible.builtin.debug:
+        msg: "Installing LVMS from bundle {{ lvms_bundle_image }}"
+
+    - name: Create openshift-lvm-storage namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ lvms_namespace }}"
+            labels:
+              openshift.io/cluster-monitoring: "true"
+              pod-security.kubernetes.io/enforce: privileged
+              pod-security.kubernetes.io/audit: privileged
+              pod-security.kubernetes.io/warn: privileged
+
+    - name: Install LVMS operator from bundle
+      ansible.builtin.command:
+        argv:
+          - operator-sdk
+          - run
+          - bundle
+          - "{{ lvms_bundle_image }}"
+          - --namespace
+          - "{{ lvms_namespace }}"
+          - --install-mode
+          - OwnNamespace
+          - --timeout
+          - 10m
+          - --security-context-config
+          - restricted
+      register: lvms_install
+      changed_when: >
+        lvms_install.rc == 0 and (
+        'created' in lvms_install.stdout or
+        'configured' in lvms_install.stdout or
+        lvms_install.rc == 0)
+      failed_when: >
+        lvms_install.rc != 0 and
+        'already exists' not in (lvms_install.stdout ~ lvms_install.stderr)
+
+    - name: Wait for LVMS operator CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ lvms_namespace }}"
+        label_selectors:
+          - "operators.coreos.com/lvms-operator.{{ lvms_namespace }}"
+      register: csv_status
+      until: >
+        csv_status.resources | length > 0 and
+        csv_status.resources[0].status is defined and
+        csv_status.resources[0].status.phase == 'Succeeded'
+      retries: 60
+      delay: 10
+
+    - name: Wait for LVMS operator pod to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ lvms_namespace }}"
+        label_selectors:
+          - "app.kubernetes.io/name=lvms-operator"
+      register: lvms_deploy
+      until: >
+        lvms_deploy.resources | length > 0 and
+        lvms_deploy.resources[0].status is defined and
+        lvms_deploy.resources[0].status.readyReplicas is defined and
+        lvms_deploy.resources[0].status.readyReplicas >= 1
+      retries: 60
+      delay: 10
+      failed_when: false
+
+    - name: Display installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ LVMS operator installed!"
+          - ""
+          - "📦 Bundle: {{ lvms_bundle_image }}"
+          - "📋 CSV: {{ csv_status.resources[0].metadata.name }} ({{ csv_status.resources[0].status.phase }})"
+          - ""
+          - "Next step: create an LVMCluster to provision storage."
+          - "   make create-lvms-cluster"

@@ -1,0 +1,35 @@
+---
+# Create one raw data volume per node in the libvirt pool.
+
+- name: Create per-node data volumes
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    pool_name: default
+    node_data_disk_size_gb: 200
+    node_data_disk_allocation_gb: 1
+    node_data_volumes:
+      - node-0
+      - node-1
+      - node-2
+
+  tasks:
+    - name: List existing volumes
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          virsh vol-list --pool {{ pool_name }} | awk 'NR > 2 && $1 != "" { print $1 }'
+      register: pool_volumes
+      changed_when: false
+
+    - name: Create per-node raw data volumes
+      ansible.builtin.command:
+        cmd: >-
+          virsh vol-create-as
+          {{ pool_name }}
+          {{ item }}
+          {{ node_data_disk_size_gb }}G
+          {{ node_data_disk_allocation_gb }}G
+          --format raw
+      loop: "{{ node_data_volumes }}"
+      when: item not in pool_volumes.stdout_lines
