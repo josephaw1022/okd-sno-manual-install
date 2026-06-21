@@ -1,0 +1,32 @@
+---
+# Ansible playbook to destroy MinIO container for Datadog BYOC Logs
+# Usage: ansible-playbook -i inventory.yml destroy-byoc-minio.yml
+
+- name: Destroy MinIO container for Datadog BYOC Logs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    minio_container_name: byoc-minio
+    minio_volume_name: byoc-minio-data
+
+  tasks:
+    - name: Remove MinIO container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ minio_container_name }}
+      register: rm_result
+      changed_when: rm_result.rc == 0
+      failed_when: false
+
+    - name: Remove MinIO volume
+      ansible.builtin.command:
+        cmd: sudo podman volume rm {{ minio_volume_name }}
+      register: vol_result
+      changed_when: vol_result.rc == 0
+      failed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "BYOC MinIO container destroyed."
+          - "Container: {{ minio_container_name }}"
+          - "Volume: {{ minio_volume_name }}"

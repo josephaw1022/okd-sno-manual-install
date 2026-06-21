@@ -162,6 +162,35 @@ ansible_password: your_ssh_password
 ansible_become_password: your_sudo_password
 ```
 
+`ansible/group_vars/all.yml` is a **local-only secrets file** used by this repo's Ansible workflows.
+
+- It is ignored by git (`ansible/.gitignore`), so values are not committed.
+- It can include additional local secrets used by automation (for example BYOC CloudPrem setup).
+- If this file is missing required keys, related make targets/playbooks will fail.
+
+Example extended file with BYOC credentials:
+
+```yaml
+# Ansible connection credentials
+ansible_password: your_ssh_password
+ansible_become_password: your_sudo_password
+
+# Datadog / BYOC
+datadog_api_key: your_datadog_api_key
+
+# BYOC PostgreSQL (external Podman container)
+byoc_postgres_db: byoclogs
+byoc_postgres_user: byoclogs
+byoc_postgres_password: change_me
+
+# BYOC MinIO (external Podman container)
+byoc_minio_access_key: byoclogs
+byoc_minio_secret_key: change_me_too
+byoc_minio_bucket: byoc-logs
+```
+
+Security note: treat this file like a secret; do not copy values into committed files such as `makefile`, `cluster-setup` manifests, or docs.
+
 ### Step 5: Copy ISO to Server
 
 ```bash

@@ -1,0 +1,206 @@
+---
+# Configure in-cluster DatadogAgent CR for OKD and route logs to CloudPrem.
+# Usage: ansible-playbook -i inventory.yml configure-datadog-agent-cloudprem.yml
+
+- name: Configure DatadogAgent for CloudPrem log ingestion
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    datadog_namespace: "{{ lookup('env', 'DATADOG_OPERATOR_NAMESPACE') | default('datadog', true) }}"
+    datadog_agent_name: datadogagent-sample
+    datadog_cluster_name: okd-homelab
+    datadog_site: us5.datadoghq.com
+    cloudprem_logs_dd_url: "http://byoc-logs-cloudprem-indexer.{{ datadog_namespace }}.svc.cluster.local:7280"
+    datadog_cluster_agent_token: "{{ lookup('env', 'DATADOG_CLUSTER_AGENT_TOKEN') | default('', true) }}"
+
+  tasks:
+    - name: Validate Datadog API and app keys are set
+      ansible.builtin.assert:
+        that:
+          - datadog_api_key is defined
+          - datadog_app_key is defined
+          - datadog_api_key | length > 0
+          - datadog_app_key | length > 0
+        fail_msg: "Set datadog_api_key and datadog_app_key in ansible/group_vars/all.yml."
+
+    - name: Ensure datadog namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ datadog_namespace }}"
+
+    - name: Read existing Datadog secret if present
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: datadog-secret
+        namespace: "{{ datadog_namespace }}"
+      register: existing_datadog_secret
+      failed_when: false
+
+    - name: Determine effective Datadog cluster-agent token
+      ansible.builtin.set_fact:
+        datadog_cluster_agent_token_effective: >-
+          {{
+            (datadog_cluster_agent_token | length > 0)
+            | ternary(
+                datadog_cluster_agent_token,
+                (
+                  (existing_datadog_secret.resources | length > 0 and
+                   existing_datadog_secret.resources[0].data is defined and
+                   existing_datadog_secret.resources[0].data.token is defined)
+                  | ternary(
+                      existing_datadog_secret.resources[0].data.token | b64decode,
+                      lookup('password', '/dev/null chars=ascii_letters,digits length=64')
+                    )
+                )
+              )
+          }}
+      no_log: true
+
+    - name: Create Datadog credentials secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: datadog-secret
+            namespace: "{{ datadog_namespace }}"
+          type: Opaque
+          stringData:
+            api-key: "{{ datadog_api_key }}"
+            app-key: "{{ datadog_app_key }}"
+            token: "{{ datadog_cluster_agent_token_effective }}"
+      no_log: true
+
+    - name: Ensure Datadog agent service account exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: datadog-agent-scc
+            namespace: "{{ datadog_namespace }}"
+
+    - name: Grant privileged SCC to Datadog agent service account
+      ansible.builtin.command:
+        cmd: oc adm policy add-scc-to-user privileged -z datadog-agent-scc -n {{ datadog_namespace }}
+      register: datadog_scc_grant
+      changed_when: "'added' in datadog_scc_grant.stdout"
+      failed_when: false
+
+    - name: Apply DatadogAgent custom resource for CloudPrem
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: datadoghq.com/v2alpha1
+          kind: DatadogAgent
+          metadata:
+            name: "{{ datadog_agent_name }}"
+            namespace: "{{ datadog_namespace }}"
+          spec:
+            features:
+              admissionController:
+                enabled: true
+              apm:
+                enabled: true
+                instrumentation:
+                  enabled: true
+                  targets:
+                    - name: apm-instrumented
+                      podSelector:
+                        matchLabels:
+                          datadoghq.com/apm-instrumentation: "enabled"
+              autoscaling:
+                workload:
+                  enabled: true
+              clusterChecks:
+                enabled: true
+                useClusterChecksRunners: true
+              eventCollection:
+                unbundleEvents: true
+              externalMetricsServer:
+                enabled: true
+                useDatadogMetrics: true
+              liveProcessCollection:
+                enabled: true
+              logCollection:
+                containerCollectAll: true
+                enabled: true
+              npm:
+                enabled: true
+              orchestratorExplorer:
+                enabled: true
+            global:
+              clusterAgentTokenSecret:
+                keyName: token
+                secretName: datadog-secret
+              clusterName: "{{ datadog_cluster_name }}"
+              credentials:
+                apiSecret:
+                  keyName: api-key
+                  secretName: datadog-secret
+                appSecret:
+                  keyName: app-key
+                  secretName: datadog-secret
+              env:
+                - name: DD_LOGS_CONFIG_LOGS_DD_URL
+                  value: "{{ cloudprem_logs_dd_url }}"
+                - name: DD_LOGS_CONFIG_EXPECTED_TAGS_DURATION
+                  value: "100000"
+              criSocketPath: /var/run/crio/crio.sock
+              kubelet:
+                tlsVerify: false
+              site: "{{ datadog_site }}"
+            override:
+              clusterAgent:
+                labels:
+                  app.kubernetes.io/name: datadog
+                  app.openshift.io/runtime: datadog
+                containers:
+                  cluster-agent:
+                    securityContext:
+                      readOnlyRootFilesystem: false
+                env:
+                  - name: DD_AUTOSCALING_FAILOVER_ENABLED
+                    value: "true"
+                replicas: 1
+                serviceAccountName: datadog-agent-scc
+              clusterChecksRunner:
+                labels:
+                  app.kubernetes.io/name: datadog
+                  app.openshift.io/runtime: datadog
+                replicas: 1
+              nodeAgent:
+                labels:
+                  app.kubernetes.io/name: datadog
+                  app.openshift.io/runtime: datadog
+                env:
+                  - name: DD_AUTOSCALING_FAILOVER_ENABLED
+                    value: "true"
+                hostNetwork: true
+                securityContext:
+                  runAsUser: 0
+                  seLinuxOptions:
+                    level: s0
+                    role: system_r
+                    type: spc_t
+                    user: system_u
+                serviceAccountName: datadog-agent-scc
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "DatadogAgent configured for CloudPrem log ingestion."
+          - "Namespace: {{ datadog_namespace }}"
+          - "DatadogAgent: {{ datadog_agent_name }}"
+          - "CloudPrem logs URL: {{ cloudprem_logs_dd_url }}"

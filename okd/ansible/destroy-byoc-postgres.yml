@@ -1,0 +1,32 @@
+---
+# Ansible playbook to destroy PostgreSQL container for Datadog BYOC Logs
+# Usage: ansible-playbook -i inventory.yml destroy-byoc-postgres.yml
+
+- name: Destroy PostgreSQL container for Datadog BYOC Logs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    pg_container_name: byoc-postgres
+    pg_volume_name: byoc-postgres-data
+
+  tasks:
+    - name: Remove PostgreSQL container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ pg_container_name }}
+      register: rm_result
+      changed_when: rm_result.rc == 0
+      failed_when: false
+
+    - name: Remove PostgreSQL volume
+      ansible.builtin.command:
+        cmd: sudo podman volume rm {{ pg_volume_name }}
+      register: vol_result
+      changed_when: vol_result.rc == 0
+      failed_when: false
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "BYOC PostgreSQL container destroyed."
+          - "Container: {{ pg_container_name }}"
+          - "Volume: {{ pg_volume_name }}"

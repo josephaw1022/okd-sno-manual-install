@@ -4,7 +4,7 @@
 # Prompts for Datadog settings at runtime (API key input is hidden).
 # Optional: override the agent image with DD_AGENT_IMAGE env var.
 #
-# Usage: ansible-playbook -i inventory.yml install-datadog-agent.yml
+# Usage: ansible-playbook -i inventory.yml install-datadog-agent-server-host.yml
 
 - name: Install Datadog agent on libvirt host
   hosts: libvirt_hosts

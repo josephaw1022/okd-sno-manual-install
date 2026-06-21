@@ -1,0 +1,129 @@
+---
+# Ansible playbook to create MinIO container for Datadog BYOC Logs
+# Usage: ansible-playbook -i inventory.yml create-byoc-minio.yml
+
+- name: Create MinIO container for Datadog BYOC Logs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    minio_container_name: byoc-minio
+    minio_ip: 192.168.1.26
+    minio_api_port: 9000
+    minio_console_port: 9001
+    minio_volume_name: byoc-minio-data
+    minio_access_key: "{{ byoc_minio_access_key }}"
+    minio_secret_key: "{{ byoc_minio_secret_key }}"
+    minio_bucket: "{{ byoc_minio_bucket }}"
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_interface: eno1
+    macvlan_network_name: okd-lb-net
+
+  tasks:
+    - name: Validate required BYOC MinIO variables are set
+      ansible.builtin.assert:
+        that:
+          - byoc_minio_access_key is defined
+          - byoc_minio_secret_key is defined
+          - byoc_minio_bucket is defined
+          - byoc_minio_access_key | length > 0
+          - byoc_minio_secret_key | length > 0
+          - byoc_minio_bucket | length > 0
+        fail_msg: "Set byoc_minio_access_key/byoc_minio_secret_key/byoc_minio_bucket in group_vars/all.yml."
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ minio_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start MinIO container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ minio_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ minio_ip }}
+          --restart always
+          -e MINIO_ROOT_USER={{ minio_access_key }}
+          -e MINIO_ROOT_PASSWORD={{ minio_secret_key }}
+          -v {{ minio_volume_name }}:/data:Z
+          docker.io/minio/minio:latest
+          server /data --console-address :{{ minio_console_port }}
+      when: container_exists.rc != 0
+      no_log: true
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ minio_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ minio_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 10
+      delay: 2
+      changed_when: false
+
+    - name: Wait for MinIO API health endpoint from Ansible controller
+      ansible.builtin.uri:
+        url: "http://{{ minio_ip }}:{{ minio_api_port }}/minio/health/live"
+        method: GET
+        status_code: 200
+      register: minio_health
+      until: minio_health.status == 200
+      retries: 20
+      delay: 2
+      changed_when: false
+      delegate_to: localhost
+      run_once: true
+
+    - name: Ensure BYOC bucket exists
+      ansible.builtin.command:
+        cmd: >
+          podman run --rm
+          --entrypoint /bin/sh
+          docker.io/minio/mc:latest
+          -c "mc alias set byoc http://{{ minio_ip }}:{{ minio_api_port }} {{ minio_access_key }} {{ minio_secret_key }} && mc mb --ignore-existing byoc/{{ minio_bucket }}"
+      register: bucket_create
+      until: bucket_create.rc == 0
+      retries: 10
+      delay: 3
+      changed_when: "'created' in bucket_create.stdout or 'created' in bucket_create.stderr"
+      no_log: true
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "BYOC MinIO container is ready."
+          - "Container: {{ minio_container_name }}"
+          - "IP Address: {{ minio_ip }}"
+          - "API Port: {{ minio_api_port }}"
+          - "Console Port: {{ minio_console_port }}"
+          - "Bucket: {{ minio_bucket }}"
+          - "Volume: {{ minio_volume_name }}"

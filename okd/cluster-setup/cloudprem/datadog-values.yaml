@@ -1,0 +1,71 @@
+# Datadog BYOC Logs chart overrides for homelab deployment.
+
+datadog:
+  site: us5.datadoghq.com
+  apiKeyExistingSecret: datadog-secret
+
+environment:
+  AWS_REGION: us-east-1
+
+serviceAccount:
+  create: true
+  name: byoc-logs
+
+config:
+  default_index_root_uri: s3://byoc-logs/indexes
+  storage:
+    s3:
+      endpoint: http://minio.kubesoar.com:9000
+      force_path_style_access: true
+
+indexer:
+  replicaCount: 1
+  podSize: medium
+  resources:
+    requests:
+      cpu: 25m
+      memory: 512Mi
+  extraEnvFrom:
+    - secretRef:
+        name: byoc-logs-minio-credentials
+
+searcher:
+  replicaCount: 1
+  podSize: medium
+  resources:
+    requests:
+      cpu: 25m
+      memory: 512Mi
+  extraEnvFrom:
+    - secretRef:
+        name: byoc-logs-minio-credentials
+
+metastore:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+  extraEnvFrom:
+    - secretRef:
+        name: byoc-logs-metastore-uri
+    - secretRef:
+        name: byoc-logs-minio-credentials
+
+control_plane:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 256Mi
+  extraEnvFrom:
+    - secretRef:
+        name: byoc-logs-minio-credentials
+
+janitor:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 256Mi
+  extraEnvFrom:
+    - secretRef:
+        name: byoc-logs-minio-credentials

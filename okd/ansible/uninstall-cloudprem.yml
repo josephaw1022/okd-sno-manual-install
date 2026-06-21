@@ -1,0 +1,41 @@
+---
+# Ansible playbook to uninstall Datadog BYOC Logs (cloudprem)
+# Usage: ansible-playbook -i inventory.yml uninstall-cloudprem.yml
+
+- name: Uninstall Datadog CloudPrem BYOC Logs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cloudprem_namespace: datadog
+    cloudprem_release_name: byoc-logs
+
+  tasks:
+    - name: Uninstall CloudPrem Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ cloudprem_release_name }}
+          --namespace {{ cloudprem_namespace }}
+          --wait
+          --ignore-not-found
+      register: helm_uninstall
+      changed_when: "'uninstalled' in (helm_uninstall.stdout | lower)"
+      failed_when: false
+
+    - name: Remove BYOC namespace when dedicated namespace is used
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ cloudprem_namespace }}"
+        state: absent
+      when: cloudprem_namespace != 'datadog'
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "CloudPrem resources removed."
+          - "Release: {{ cloudprem_release_name }}"
+          - "Namespace: {{ cloudprem_namespace }}"

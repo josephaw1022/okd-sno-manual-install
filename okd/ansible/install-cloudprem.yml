@@ -1,0 +1,143 @@
+---
+# Ansible playbook to install Datadog BYOC Logs (cloudprem) on OpenShift/OKD
+# Usage: ansible-playbook -i inventory.yml install-cloudprem.yml
+
+- name: Install Datadog CloudPrem BYOC Logs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cloudprem_namespace: datadog
+    cloudprem_release_name: byoc-logs
+    cloudprem_chart_ref: datadog/cloudprem
+    cloudprem_values_file: ../cluster-setup/cloudprem/datadog-values.yaml
+    postgres_host: postgres.kubesoar.com
+    postgres_port: 5432
+    minio_endpoint: http://minio.kubesoar.com:9000
+
+  tasks:
+    - name: Validate required BYOC credential variables are set
+      ansible.builtin.assert:
+        that:
+          - datadog_api_key is defined
+          - byoc_postgres_db is defined
+          - byoc_postgres_user is defined
+          - byoc_postgres_password is defined
+          - byoc_minio_access_key is defined
+          - byoc_minio_secret_key is defined
+          - datadog_api_key | length > 0
+          - byoc_postgres_db | length > 0
+          - byoc_postgres_user | length > 0
+          - byoc_postgres_password | length > 0
+          - byoc_minio_access_key | length > 0
+          - byoc_minio_secret_key | length > 0
+        fail_msg: "Set Datadog/BYOC credentials in ansible/group_vars/all.yml."
+
+    - name: Ensure BYOC namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ cloudprem_namespace }}"
+
+    - name: Ensure CloudPrem service account exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: byoc-logs
+            namespace: "{{ cloudprem_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: Helm
+            annotations:
+              meta.helm.sh/release-name: "{{ cloudprem_release_name }}"
+              meta.helm.sh/release-namespace: "{{ cloudprem_namespace }}"
+
+    - name: Grant anyuid SCC to CloudPrem service account
+      ansible.builtin.command:
+        cmd: oc adm policy add-scc-to-user anyuid -z byoc-logs -n {{ cloudprem_namespace }}
+      register: cloudprem_scc_grant
+      changed_when: "'added' in cloudprem_scc_grant.stdout"
+      failed_when: false
+
+    - name: Create Datadog API key secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: datadog-secret
+            namespace: "{{ cloudprem_namespace }}"
+          type: Opaque
+          stringData:
+            api-key: "{{ datadog_api_key }}"
+      no_log: true
+
+    - name: Create metastore URI secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: byoc-logs-metastore-uri
+            namespace: "{{ cloudprem_namespace }}"
+          type: Opaque
+          stringData:
+            QW_METASTORE_URI: "postgres://{{ byoc_postgres_user | urlencode }}:{{ byoc_postgres_password | urlencode }}@{{ postgres_host }}:{{ postgres_port }}/{{ byoc_postgres_db }}"
+      no_log: true
+
+    - name: Create MinIO credentials secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: byoc-logs-minio-credentials
+            namespace: "{{ cloudprem_namespace }}"
+          type: Opaque
+          stringData:
+            AWS_ACCESS_KEY_ID: "{{ byoc_minio_access_key }}"
+            AWS_SECRET_ACCESS_KEY: "{{ byoc_minio_secret_key }}"
+      no_log: true
+
+    - name: Ensure Datadog Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add datadog https://helm.datadoghq.com
+      register: helm_repo_add
+      changed_when: "'already exists' not in (helm_repo_add.stderr | default(''))"
+      failed_when: false
+
+    - name: Update Helm repos
+      ansible.builtin.command:
+        cmd: helm repo update
+      changed_when: false
+
+    - name: Install or upgrade CloudPrem chart
+      ansible.builtin.command:
+        cmd: >
+          helm upgrade --install {{ cloudprem_release_name }} {{ cloudprem_chart_ref }}
+          --namespace {{ cloudprem_namespace }}
+          --create-namespace=false
+          --set config.default_index_root_uri=s3://{{ byoc_minio_bucket }}/indexes
+          -f {{ cloudprem_values_file }}
+      register: helm_install
+      changed_when: "'STATUS: deployed' in helm_install.stdout or 'STATUS: pending-upgrade' in helm_install.stdout"
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "CloudPrem release applied successfully."
+          - "Release: {{ cloudprem_release_name }}"
+          - "Namespace: {{ cloudprem_namespace }}"
+          - "MinIO endpoint: {{ minio_endpoint }}"
+          - "Metastore host: {{ postgres_host }}:{{ postgres_port }}"

@@ -1,6 +1,6 @@
 ---
 # Remove Datadog agent Podman container from the libvirt host (desktop-server).
-# Usage: ansible-playbook -i inventory.yml destroy-datadog-agent.yml
+# Usage: ansible-playbook -i inventory.yml destroy-datadog-agent-server-host.yml
 
 - name: Destroy Datadog agent on libvirt host
   hosts: libvirt_hosts

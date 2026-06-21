@@ -1,0 +1,109 @@
+---
+# Ansible playbook to create PostgreSQL container for Datadog BYOC Logs
+# Usage: ansible-playbook -i inventory.yml create-byoc-postgres.yml
+
+- name: Create PostgreSQL container for Datadog BYOC Logs
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    pg_container_name: byoc-postgres
+    pg_ip: 192.168.1.25
+    pg_port: 5432
+    pg_volume_name: byoc-postgres-data
+    pg_database: "{{ byoc_postgres_db }}"
+    pg_user: "{{ byoc_postgres_user }}"
+    pg_password: "{{ byoc_postgres_password }}"
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_interface: eno1
+    macvlan_network_name: okd-lb-net
+
+  tasks:
+    - name: Validate required BYOC PostgreSQL variables are set
+      ansible.builtin.assert:
+        that:
+          - byoc_postgres_db is defined
+          - byoc_postgres_user is defined
+          - byoc_postgres_password is defined
+          - byoc_postgres_db | length > 0
+          - byoc_postgres_user | length > 0
+          - byoc_postgres_password | length > 0
+        fail_msg: "Set byoc_postgres_db/byoc_postgres_user/byoc_postgres_password in group_vars/all.yml."
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ pg_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start PostgreSQL container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ pg_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ pg_ip }}
+          --restart always
+          -e POSTGRES_DB={{ pg_database }}
+          -e POSTGRES_USER={{ pg_user }}
+          -e POSTGRES_PASSWORD={{ pg_password }}
+          -v {{ pg_volume_name }}:/var/lib/postgresql/data:Z
+          docker.io/postgres:15
+      when: container_exists.rc != 0
+      no_log: true
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ pg_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ pg_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 10
+      delay: 2
+      changed_when: false
+
+    - name: Wait for PostgreSQL to be ready
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} pg_isready -U {{ pg_user }} -d {{ pg_database }}
+      register: pg_ready
+      until: pg_ready.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+      no_log: true
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "BYOC PostgreSQL container is ready."
+          - "Container: {{ pg_container_name }}"
+          - "IP Address: {{ pg_ip }}"
+          - "Port: {{ pg_port }}"
+          - "Database: {{ pg_database }}"
+          - "User: {{ pg_user }}"
+          - "Volume: {{ pg_volume_name }}"

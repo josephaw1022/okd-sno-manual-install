@@ -456,30 +456,6 @@ destroy-registry-cache: ## Destroy pull-through cache registry.
 	@echo "✅ Registry cache destroyed"
 
 
-# Datadog agent on desktop-server (libvirt host). Prompts for API key, site, and env at runtime.
-DD_AGENT_IMAGE ?= gcr.io/datadoghq/agent:7
-
-
-.PHONY: install-datadog-agent
-install-datadog-agent: ## Deploy Datadog agent on desktop-server (prompts for API key, site, env).
-	@echo "📊 Installing Datadog agent on desktop-server..."
-	@echo "   First run pulls a large container image and may take a few minutes."
-	@pushd ansible > /dev/null && \
-	DD_AGENT_IMAGE="$(DD_AGENT_IMAGE)" \
-	ansible-playbook -i inventory.yml install-datadog-agent.yml && \
-	popd > /dev/null
-	@echo "✅ Datadog agent installed"
-
-
-.PHONY: destroy-datadog-agent
-destroy-datadog-agent: ## Remove Datadog agent Podman container from desktop-server.
-	@echo "💥 Removing Datadog agent from desktop-server..."
-	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml destroy-datadog-agent.yml && \
-	popd > /dev/null
-	@echo "✅ Datadog agent removed"
-
-
 ##@ Cluster Configuration
 
 .PHONY: setup-entraid
@@ -792,3 +768,132 @@ install-developer-operators: ## Install RabbitMQ, Strimzi, CloudNativePG, Opstre
 	@$(MAKE) install-opstree-redis-operator
 	@$(MAKE) install-minio-operator
 	@echo "✅ Developer operators installation complete"
+
+
+##@ Datadog Configuration
+
+# Datadog server-host agent image override.
+DD_AGENT_IMAGE ?= gcr.io/datadoghq/agent:7
+
+
+.PHONY: create-byoc-postgres
+create-byoc-postgres: ## Create PostgreSQL container for Datadog BYOC Logs.
+	@echo "🐘 Creating BYOC PostgreSQL container..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-byoc-postgres.yml && \
+	popd > /dev/null
+	@echo "✅ BYOC PostgreSQL container created"
+
+
+.PHONY: create-byoc-minio
+create-byoc-minio: ## Create MinIO container for Datadog BYOC Logs.
+	@echo "🪣 Creating BYOC MinIO container..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-byoc-minio.yml && \
+	popd > /dev/null
+	@echo "✅ BYOC MinIO container created"
+
+
+.PHONY: destroy-byoc-postgres
+destroy-byoc-postgres: ## Destroy PostgreSQL container for Datadog BYOC Logs.
+	@echo "💥 Destroying BYOC PostgreSQL container..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-byoc-postgres.yml && \
+	popd > /dev/null
+	@echo "✅ BYOC PostgreSQL container destroyed"
+
+
+.PHONY: destroy-byoc-minio
+destroy-byoc-minio: ## Destroy MinIO container for Datadog BYOC Logs.
+	@echo "💥 Destroying BYOC MinIO container..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-byoc-minio.yml && \
+	popd > /dev/null
+	@echo "✅ BYOC MinIO container destroyed"
+
+
+.PHONY: install-cloudprem-container-stack
+install-cloudprem-container-stack: ## Install Datadog BYOC Logs CloudPrem stack on cluster (uses external containers).
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "☁️ Installing Datadog CloudPrem BYOC Logs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-cloudprem.yml && \
+	popd > /dev/null
+	@echo "✅ CloudPrem installed"
+
+
+.PHONY: uninstall-cloudprem-container-stack
+uninstall-cloudprem-container-stack: ## Uninstall Datadog BYOC Logs CloudPrem stack from cluster.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Datadog CloudPrem BYOC Logs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml uninstall-cloudprem.yml && \
+	popd > /dev/null
+	@echo "✅ CloudPrem removed"
+
+
+.PHONY: install-datadog-agent-server-host
+install-datadog-agent-server-host: ## Deploy Datadog agent Podman container on desktop-server.
+	@echo "📊 Installing Datadog agent on desktop-server..."
+	@echo "   First run pulls a large container image and may take a few minutes."
+	@pushd ansible > /dev/null && \
+	DD_AGENT_IMAGE="$(DD_AGENT_IMAGE)" \
+	ansible-playbook -i inventory.yml install-datadog-agent-server-host.yml && \
+	popd > /dev/null
+	@echo "✅ Datadog agent installed"
+
+
+.PHONY: install-datadog-operator
+install-datadog-operator: ## Install Datadog Operator required for DatadogAgent CRs.
+	@echo "🧩 Installing Datadog Operator..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-datadog-operator.yml && \
+	popd > /dev/null
+	@echo "✅ Datadog Operator installed"
+
+
+.PHONY: destroy-datadog-agent-server-host
+destroy-datadog-agent-server-host: ## Remove Datadog agent Podman container from desktop-server.
+	@echo "💥 Removing Datadog agent from desktop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-datadog-agent-server-host.yml && \
+	popd > /dev/null
+	@echo "✅ Datadog agent removed"
+
+
+.PHONY: configure-datadog-agent-cluster-cloudprem
+configure-datadog-agent-cluster-cloudprem: ## Configure in-cluster DatadogAgent CR to send logs to CloudPrem.
+	@echo "📈 Configuring in-cluster DatadogAgent for CloudPrem logs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-datadog-agent-cloudprem.yml && \
+	popd > /dev/null
+	@echo "✅ DatadogAgent configured for CloudPrem"
+
+
+.PHONY: configure-datadog-cloudprem-all
+configure-datadog-cloudprem-all: ## Run full Datadog CloudPrem setup (containers, DNS, stack, cluster agent, server agent).
+	@echo "🚀 Running full Datadog CloudPrem setup..."
+	@$(MAKE) create-byoc-postgres
+	@$(MAKE) create-byoc-minio
+	@$(MAKE) update-dns
+	@$(MAKE) install-cloudprem-container-stack
+	@$(MAKE) install-datadog-operator
+	@$(MAKE) configure-datadog-agent-cluster-cloudprem
+	@$(MAKE) install-datadog-agent-server-host
+	@echo "✅ Datadog CloudPrem full setup complete"
+
+
+.PHONY: undo-datadog-cloudprem-all
+undo-datadog-cloudprem-all: ## Undo Datadog CloudPrem setup (server agent, cluster stack, BYOC containers).
+	@echo "↩️ Undoing Datadog CloudPrem setup..."
+	@$(MAKE) destroy-datadog-agent-server-host
+	@$(MAKE) uninstall-cloudprem-container-stack
+	@$(MAKE) destroy-byoc-minio
+	@$(MAKE) destroy-byoc-postgres
+	@echo "✅ Datadog CloudPrem teardown complete"

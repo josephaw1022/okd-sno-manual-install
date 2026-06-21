@@ -1,0 +1,122 @@
+---
+# Ansible playbook to install Datadog Operator via upstream Helm chart
+# Usage: ansible-playbook -i inventory.yml install-datadog-operator.yml
+
+- name: Install Datadog Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    datadog_operator_namespace: "{{ lookup('env', 'DATADOG_OPERATOR_NAMESPACE') | default('datadog', true) }}"
+    datadog_operator_release_name: "{{ lookup('env', 'DATADOG_OPERATOR_RELEASE_NAME') | default('datadog-operator', true) }}"
+    datadog_operator_chart: "{{ lookup('env', 'DATADOG_OPERATOR_CHART') | default('datadog/datadog-operator', true) }}"
+    datadog_operator_repo_name: datadog
+    datadog_operator_repo_url: https://helm.datadoghq.com
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Remove legacy Datadog OperatorHub subscriptions if present
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: datadog-operator
+            namespace: "{{ item }}"
+      loop:
+        - openshift-operators
+        - datadog-operator
+        - datadog
+
+    - name: Remove legacy Datadog OperatorGroups if present
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: datadog-operator-group
+            namespace: "{{ item }}"
+      loop:
+        - openshift-operators
+        - datadog-operator
+        - datadog
+
+    - name: Remove legacy Datadog OLM manager deployments if present
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: datadog-operator-manager
+            namespace: "{{ item }}"
+      loop:
+        - openshift-operators
+        - datadog-operator
+        - datadog
+
+    - name: Ensure Datadog operator namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ datadog_operator_namespace }}"
+
+    - name: Ensure Datadog Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add {{ datadog_operator_repo_name }} {{ datadog_operator_repo_url }}
+      register: datadog_repo_add
+      changed_when: "'has been added' in datadog_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Datadog Helm repo
+      ansible.builtin.command:
+        cmd: helm repo update {{ datadog_operator_repo_name }}
+      changed_when: false
+
+    - name: Install or upgrade Datadog Operator Helm chart
+      ansible.builtin.command:
+        cmd: >
+          helm upgrade --install {{ datadog_operator_release_name }} {{ datadog_operator_chart }}
+          --namespace {{ datadog_operator_namespace }}
+          --create-namespace
+          --wait
+          --timeout 5m
+
+    - name: Wait for DatadogAgent CRD to be established
+      ansible.builtin.command:
+        cmd: oc wait --for=condition=Established crd/datadogagents.datadoghq.com --timeout=180s
+      changed_when: false
+
+    - name: Display Datadog operator installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Datadog Operator (Helm) installed successfully."
+          - "Namespace: {{ datadog_operator_namespace }}"
+          - "Helm release: {{ datadog_operator_release_name }}"
+          - "Helm chart: {{ datadog_operator_chart }}"
