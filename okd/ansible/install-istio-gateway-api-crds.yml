@@ -1,0 +1,71 @@
+---
+# Ansible playbook to install Gateway API CRDs for Istio ingress/gateway support
+# Usage: ansible-playbook -i inventory.yml install-istio-gateway-api-crds.yml
+
+- name: Install Gateway API CRDs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    gateway_api_crds_url: >-
+      {{
+        lookup('env', 'GATEWAY_API_CRDS_URL')
+        | default('https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml', true)
+      }}
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Detect existing GatewayClass CRD manager
+      ansible.builtin.command:
+        cmd: oc get crd gatewayclasses.gateway.networking.k8s.io -o jsonpath={.metadata.managedFields[0].manager}
+      register: gatewayclass_crd_manager
+      changed_when: false
+      failed_when: false
+
+    - name: Check if GatewayClass CRD exists
+      ansible.builtin.command:
+        cmd: oc get crd gatewayclasses.gateway.networking.k8s.io
+      register: gatewayclass_crd_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Apply Gateway API CRDs when not OpenShift-operator managed
+      ansible.builtin.command:
+        cmd: oc apply -f {{ gateway_api_crds_url }}
+      register: gateway_api_apply
+      changed_when: "'configured' in gateway_api_apply.stdout or 'created' in gateway_api_apply.stdout"
+      when: not (gatewayclass_crd_exists.rc == 0 and (gatewayclass_crd_manager.stdout | trim) == 'ingress-operator')
+
+    - name: Skip apply when OpenShift Ingress Operator manages Gateway API CRDs
+      ansible.builtin.debug:
+        msg:
+          - "ℹ️ Gateway API CRDs are already managed by OpenShift Ingress Operator; skipping upstream apply."
+          - "Detected manager: {{ gatewayclass_crd_manager.stdout | trim }}"
+      when: gatewayclass_crd_exists.rc == 0 and (gatewayclass_crd_manager.stdout | trim) == 'ingress-operator'
+
+    - name: Wait for Gateway API GatewayClass CRD to be established
+      ansible.builtin.command:
+        cmd: oc wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io --timeout=180s
+      changed_when: false
+
+    - name: Display Gateway API install status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Gateway API CRDs are present."
+          - "Source: {{ gateway_api_crds_url }}"

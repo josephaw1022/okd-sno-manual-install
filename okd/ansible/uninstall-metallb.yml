@@ -1,0 +1,56 @@
+---
+# Ansible playbook to uninstall MetalLB Helm release on OpenShift/OKD
+# Usage: ansible-playbook -i inventory.yml uninstall-metallb.yml
+
+- name: Uninstall MetalLB via Helm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    metallb_namespace: "{{ lookup('env', 'METALLB_NAMESPACE') | default('metallb-system', true) }}"
+    metallb_release_name: "{{ lookup('env', 'METALLB_HELM_RELEASE') | default('metallb', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Uninstall MetalLB Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ metallb_release_name }}
+          --namespace {{ metallb_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: metallb_uninstall
+      changed_when: "'uninstalled' in metallb_uninstall.stdout | lower"
+
+    - name: Remove MetalLB speaker SCC cluster role binding
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: metallb-speaker-scc-privileged
+
+    - name: Remove MetalLB controller SCC cluster role binding
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: metallb-controller-scc-privileged
+
+    - name: Display MetalLB uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ MetalLB uninstall requested."
+          - "Release: {{ metallb_release_name }}"
+          - "Namespace: {{ metallb_namespace }}"

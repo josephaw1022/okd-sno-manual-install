@@ -23,5 +23,5 @@ Provides essential information about the physical infrastructure supporting the 
 ## Gotchas
 
 - **Cockpit Port:** Both servers use port **9090** for Cockpit.
-- **OS Versions:** Lenovo runs RHEL 9.7, while Supermicro runs AlmaLinux 10.1.
+- **OS Versions:** Lenovo runs AlmaLinux 9.7, while Supermicro runs AlmaLinux 10.1.
 - **Dell PowerEdge:** This server is currently idle and not part of the active OKD cluster infrastructure.

@@ -897,3 +897,319 @@ undo-datadog-cloudprem-all: ## Undo Datadog CloudPrem setup (server agent, clust
 	@$(MAKE) destroy-byoc-minio
 	@$(MAKE) destroy-byoc-postgres
 	@echo "✅ Datadog CloudPrem teardown complete"
+
+
+##@ Istio Ambient Mesh (Helm)
+
+ISTIO_NAMESPACE ?= istio-system
+ISTIO_HELM_REPO_NAME ?= istio
+ISTIO_HELM_REPO_URL ?= https://istio-release.storage.googleapis.com/charts
+ISTIO_BASE_RELEASE ?= istio-base
+ISTIOD_RELEASE ?= istiod
+ISTIO_CNI_RELEASE ?= istio-cni
+ISTIO_ZTUNNEL_RELEASE ?= ztunnel
+ISTIO_INGRESS_RELEASE ?= istio-ingress
+ISTIO_INGRESS_CLASS_NAME ?= istio
+ISTIO_CHART_VERSION ?=
+GATEWAY_API_CRDS_URL ?= https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml
+
+
+.PHONY: install-istio-gateway-api-crds
+install-istio-gateway-api-crds: ## Install Gateway API CRDs (latest stable release, 1.5+ when available).
+	@echo "🛣️ Installing Gateway API CRDs..."
+	@pushd ansible > /dev/null && \
+	GATEWAY_API_CRDS_URL="$(GATEWAY_API_CRDS_URL)" \
+	ansible-playbook -i inventory.yml install-istio-gateway-api-crds.yml && \
+	popd > /dev/null
+	@echo "✅ Gateway API CRDs installed"
+
+
+.PHONY: uninstall-istio-gateway-api-crds
+uninstall-istio-gateway-api-crds: ## Uninstall Gateway API CRDs.
+	@echo "🗑️ Uninstalling Gateway API CRDs..."
+	@pushd ansible > /dev/null && \
+	GATEWAY_API_CRDS_URL="$(GATEWAY_API_CRDS_URL)" \
+	ansible-playbook -i inventory.yml uninstall-istio-gateway-api-crds.yml && \
+	popd > /dev/null
+	@echo "✅ Gateway API CRDs uninstall requested"
+
+
+.PHONY: install-istio-crds
+install-istio-crds: ## Install Istio CRDs and cluster roles from Helm base chart.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "📦 Installing Istio base chart (CRDs)..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_HELM_REPO_NAME="$(ISTIO_HELM_REPO_NAME)" \
+	ISTIO_HELM_REPO_URL="$(ISTIO_HELM_REPO_URL)" \
+	ISTIO_BASE_RELEASE="$(ISTIO_BASE_RELEASE)" \
+	ISTIO_CHART_VERSION="$(ISTIO_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-istio-crds.yml && \
+	popd > /dev/null
+	@echo "✅ Istio CRDs installed"
+
+
+.PHONY: uninstall-istio-crds
+uninstall-istio-crds: ## Uninstall Istio base chart release (CRDs chart).
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Istio base chart release..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_BASE_RELEASE="$(ISTIO_BASE_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-istio-crds.yml && \
+	popd > /dev/null
+	@echo "✅ Istio base release uninstall requested"
+
+
+.PHONY: install-istio
+install-istio: ## Install Istiod control plane in ambient profile using Helm.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🧠 Installing Istiod (ambient profile)..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_HELM_REPO_NAME="$(ISTIO_HELM_REPO_NAME)" \
+	ISTIO_HELM_REPO_URL="$(ISTIO_HELM_REPO_URL)" \
+	ISTIOD_RELEASE="$(ISTIOD_RELEASE)" \
+	ISTIO_CHART_VERSION="$(ISTIO_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-istio.yml && \
+	popd > /dev/null
+	@echo "✅ Istiod installed"
+
+
+.PHONY: uninstall-istio
+uninstall-istio: ## Uninstall Istiod control plane Helm release.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Istiod..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIOD_RELEASE="$(ISTIOD_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-istio.yml && \
+	popd > /dev/null
+	@echo "✅ Istiod uninstall requested"
+
+
+.PHONY: install-istio-cni
+install-istio-cni: ## Install Istio CNI (ambient profile) using Helm.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🕸️ Installing Istio CNI (ambient profile)..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_HELM_REPO_NAME="$(ISTIO_HELM_REPO_NAME)" \
+	ISTIO_HELM_REPO_URL="$(ISTIO_HELM_REPO_URL)" \
+	ISTIO_CNI_RELEASE="$(ISTIO_CNI_RELEASE)" \
+	ISTIO_CHART_VERSION="$(ISTIO_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-istio-cni.yml && \
+	popd > /dev/null
+	@echo "✅ Istio CNI installed"
+
+
+.PHONY: uninstall-istio-cni
+uninstall-istio-cni: ## Uninstall Istio CNI Helm release.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Istio CNI..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_CNI_RELEASE="$(ISTIO_CNI_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-istio-cni.yml && \
+	popd > /dev/null
+	@echo "✅ Istio CNI uninstall requested"
+
+
+.PHONY: install-istio-ztunnel
+install-istio-ztunnel: ## Install ztunnel data plane for ambient mesh using Helm.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🔒 Installing ztunnel..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_HELM_REPO_NAME="$(ISTIO_HELM_REPO_NAME)" \
+	ISTIO_HELM_REPO_URL="$(ISTIO_HELM_REPO_URL)" \
+	ISTIO_ZTUNNEL_RELEASE="$(ISTIO_ZTUNNEL_RELEASE)" \
+	ISTIO_CHART_VERSION="$(ISTIO_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-istio-ztunnel.yml && \
+	popd > /dev/null
+	@echo "✅ ztunnel installed"
+
+
+.PHONY: uninstall-istio-ztunnel
+uninstall-istio-ztunnel: ## Uninstall ztunnel Helm release.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling ztunnel..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_ZTUNNEL_RELEASE="$(ISTIO_ZTUNNEL_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-istio-ztunnel.yml && \
+	popd > /dev/null
+	@echo "✅ ztunnel uninstall requested"
+
+
+.PHONY: install-istio-ingress
+install-istio-ingress: ## Install Istio ingress gateway Helm chart.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🌐 Installing Istio ingress gateway..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_HELM_REPO_NAME="$(ISTIO_HELM_REPO_NAME)" \
+	ISTIO_HELM_REPO_URL="$(ISTIO_HELM_REPO_URL)" \
+	ISTIO_INGRESS_RELEASE="$(ISTIO_INGRESS_RELEASE)" \
+	ISTIO_CHART_VERSION="$(ISTIO_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-istio-ingress.yml && \
+	popd > /dev/null
+	@echo "✅ Istio ingress gateway installed"
+
+
+.PHONY: uninstall-istio-ingress
+uninstall-istio-ingress: ## Uninstall Istio ingress gateway Helm release.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Istio ingress gateway..."
+	@pushd ansible > /dev/null && \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_INGRESS_RELEASE="$(ISTIO_INGRESS_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-istio-ingress.yml && \
+	popd > /dev/null
+	@echo "✅ Istio ingress gateway uninstall requested"
+
+
+.PHONY: install-istio-ingress-class
+install-istio-ingress-class: ## Install IngressClass resource for Istio ingress controller.
+	@echo "🚦 Installing Istio ingress class..."
+	@pushd ansible > /dev/null && \
+	ISTIO_INGRESS_CLASS_NAME="$(ISTIO_INGRESS_CLASS_NAME)" \
+	ansible-playbook -i inventory.yml install-istio-ingress-class.yml && \
+	popd > /dev/null
+	@echo "✅ Istio ingress class installed"
+
+
+.PHONY: uninstall-istio-ingress-class
+uninstall-istio-ingress-class: ## Uninstall IngressClass resource for Istio ingress controller.
+	@echo "🗑️ Uninstalling Istio ingress class..."
+	@pushd ansible > /dev/null && \
+	ISTIO_INGRESS_CLASS_NAME="$(ISTIO_INGRESS_CLASS_NAME)" \
+	ansible-playbook -i inventory.yml uninstall-istio-ingress-class.yml && \
+	popd > /dev/null
+	@echo "✅ Istio ingress class uninstall requested"
+
+
+.PHONY: install-istio-all
+install-istio-all: ## Install full Istio ambient stack: Gateway API CRDs, base, istiod, cni, ztunnel, ingress, ingress class.
+	@echo "🚀 Installing full Istio ambient stack..."
+	@$(MAKE) install-istio-gateway-api-crds
+	@$(MAKE) install-istio-crds
+	@$(MAKE) install-istio
+	@$(MAKE) install-istio-cni
+	@$(MAKE) install-istio-ztunnel
+	@$(MAKE) install-istio-ingress
+	@$(MAKE) install-istio-ingress-class
+	@echo "✅ Full Istio ambient stack installation complete"
+
+
+.PHONY: uninstall-istio-all
+uninstall-istio-all: ## Uninstall full Istio ambient stack in reverse order.
+	@echo "↩️ Uninstalling full Istio ambient stack..."
+	@$(MAKE) uninstall-istio-ingress-class
+	@$(MAKE) uninstall-istio-ingress
+	@$(MAKE) uninstall-istio-ztunnel
+	@$(MAKE) uninstall-istio-cni
+	@$(MAKE) uninstall-istio
+	@$(MAKE) uninstall-istio-crds
+	@$(MAKE) uninstall-istio-gateway-api-crds
+	@echo "✅ Full Istio ambient stack uninstall complete"
+
+
+##@ MetalLB (Helm)
+
+METALLB_NAMESPACE ?= metallb-system
+METALLB_HELM_REPO_NAME ?= metallb
+METALLB_HELM_REPO_URL ?= https://metallb.github.io/metallb
+METALLB_HELM_RELEASE ?= metallb
+METALLB_CHART_VERSION ?=
+METALLB_ADDRESS_RANGE ?= 192.168.1.230-192.168.1.249
+METALLB_IPADDRESSPOOL_NAME ?= default-address-pool
+METALLB_L2ADVERTISEMENT_NAME ?= default-l2-advertisement
+
+
+.PHONY: install-metallb
+install-metallb: ## Install MetalLB via upstream Helm chart (not OperatorHub).
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "📦 Installing MetalLB Helm chart..."
+	@pushd ansible > /dev/null && \
+	METALLB_NAMESPACE="$(METALLB_NAMESPACE)" \
+	METALLB_HELM_REPO_NAME="$(METALLB_HELM_REPO_NAME)" \
+	METALLB_HELM_REPO_URL="$(METALLB_HELM_REPO_URL)" \
+	METALLB_HELM_RELEASE="$(METALLB_HELM_RELEASE)" \
+	METALLB_CHART_VERSION="$(METALLB_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-metallb.yml && \
+	popd > /dev/null
+	@echo "✅ MetalLB installed"
+
+
+.PHONY: uninstall-metallb
+uninstall-metallb: ## Uninstall MetalLB Helm release and SCC bindings.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling MetalLB Helm chart..."
+	@pushd ansible > /dev/null && \
+	METALLB_NAMESPACE="$(METALLB_NAMESPACE)" \
+	METALLB_HELM_RELEASE="$(METALLB_HELM_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-metallb.yml && \
+	popd > /dev/null
+	@echo "✅ MetalLB uninstall requested"
+
+
+.PHONY: install-metallb-l2-config
+install-metallb-l2-config: ## Install MetalLB IPAddressPool and L2Advertisement resources.
+	@echo "🛣️ Installing MetalLB L2 configuration..."
+	@pushd ansible > /dev/null && \
+	METALLB_NAMESPACE="$(METALLB_NAMESPACE)" \
+	METALLB_ADDRESS_RANGE="$(METALLB_ADDRESS_RANGE)" \
+	METALLB_IPADDRESSPOOL_NAME="$(METALLB_IPADDRESSPOOL_NAME)" \
+	METALLB_L2ADVERTISEMENT_NAME="$(METALLB_L2ADVERTISEMENT_NAME)" \
+	ansible-playbook -i inventory.yml install-metallb-l2-config.yml && \
+	popd > /dev/null
+	@echo "✅ MetalLB L2 configuration installed"
+
+
+.PHONY: uninstall-metallb-l2-config
+uninstall-metallb-l2-config: ## Uninstall MetalLB IPAddressPool and L2Advertisement resources.
+	@echo "🗑️ Uninstalling MetalLB L2 configuration..."
+	@pushd ansible > /dev/null && \
+	METALLB_NAMESPACE="$(METALLB_NAMESPACE)" \
+	METALLB_IPADDRESSPOOL_NAME="$(METALLB_IPADDRESSPOOL_NAME)" \
+	METALLB_L2ADVERTISEMENT_NAME="$(METALLB_L2ADVERTISEMENT_NAME)" \
+	ansible-playbook -i inventory.yml uninstall-metallb-l2-config.yml && \
+	popd > /dev/null
+	@echo "✅ MetalLB L2 configuration uninstall requested"

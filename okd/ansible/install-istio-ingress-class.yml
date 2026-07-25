@@ -1,0 +1,45 @@
+---
+# Ansible playbook to create an Istio IngressClass resource
+# Usage: ansible-playbook -i inventory.yml install-istio-ingress-class.yml
+
+- name: Install Istio ingress class
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_ingress_class_name: "{{ lookup('env', 'ISTIO_INGRESS_CLASS_NAME') | default('istio', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Create IngressClass for Istio ingress controller
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: IngressClass
+          metadata:
+            name: "{{ istio_ingress_class_name }}"
+          spec:
+            controller: istio.io/ingress-controller
+
+    - name: Display Istio ingress class status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio ingress class installed."
+          - "IngressClass: {{ istio_ingress_class_name }}"

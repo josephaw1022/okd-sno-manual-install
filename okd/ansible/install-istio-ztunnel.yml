@@ -1,0 +1,105 @@
+---
+# Ansible playbook to install ztunnel for Istio ambient mesh via Helm
+# Usage: ansible-playbook -i inventory.yml install-istio-ztunnel.yml
+
+- name: Install Istio ztunnel
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istio_repo_name: "{{ lookup('env', 'ISTIO_HELM_REPO_NAME') | default('istio', true) }}"
+    istio_repo_url: "{{ lookup('env', 'ISTIO_HELM_REPO_URL') | default('https://istio-release.storage.googleapis.com/charts', true) }}"
+    istio_ztunnel_release: "{{ lookup('env', 'ISTIO_ZTUNNEL_RELEASE') | default('ztunnel', true) }}"
+    istio_chart_version: "{{ lookup('env', 'ISTIO_CHART_VERSION') | default('', true) }}"
+    istio_global_platform: "{{ lookup('env', 'ISTIO_GLOBAL_PLATFORM') | default('openshift', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Istio Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add {{ istio_repo_name }} {{ istio_repo_url }}
+      register: istio_repo_add
+      changed_when: "'has been added' in istio_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Istio Helm repo
+      ansible.builtin.command:
+        cmd: helm repo update {{ istio_repo_name }}
+      changed_when: false
+
+    - name: Ensure Istio namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ istio_namespace }}"
+
+    - name: Ensure ztunnel SCC cluster role binding exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: ztunnel-scc-privileged
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:privileged
+          subjects:
+            - kind: ServiceAccount
+              name: ztunnel
+              namespace: "{{ istio_namespace }}"
+
+    - name: Build Helm command for ztunnel install
+      ansible.builtin.set_fact:
+        istio_ztunnel_helm_cmd: >-
+          helm upgrade --install {{ istio_ztunnel_release }} {{ istio_repo_name }}/ztunnel
+          --namespace {{ istio_namespace }}
+          --create-namespace
+          --set global.platform={{ istio_global_platform }}
+          --wait
+          --timeout 10m
+          {{ ('--version ' ~ istio_chart_version) if (istio_chart_version | length > 0) else '' }}
+
+    - name: Install or upgrade ztunnel release
+      ansible.builtin.command:
+        cmd: "{{ istio_ztunnel_helm_cmd }}"
+      register: istio_ztunnel_install
+      changed_when: "'STATUS: deployed' in istio_ztunnel_install.stdout or 'STATUS: pending-upgrade' in istio_ztunnel_install.stdout"
+
+    - name: Wait for ztunnel daemonset to be ready
+      ansible.builtin.command:
+        cmd: oc rollout status daemonset/ztunnel -n {{ istio_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Display ztunnel install status
+      ansible.builtin.debug:
+        msg:
+          - "✅ ztunnel installed for ambient mesh."
+          - "Release: {{ istio_ztunnel_release }}"
+          - "Namespace: {{ istio_namespace }}"

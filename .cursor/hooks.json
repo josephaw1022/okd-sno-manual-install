@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/deny-kubectl-delete-without-noninteractive.sh",
+        "matcher": "(kubectl|oc)\\s",
+        "failClosed": true
+      }
+    ]
+  }
+}

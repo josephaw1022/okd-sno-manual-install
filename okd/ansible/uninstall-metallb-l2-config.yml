@@ -1,0 +1,46 @@
+---
+# Ansible playbook to uninstall MetalLB IPAddressPool and L2Advertisement resources
+# Usage: ansible-playbook -i inventory.yml uninstall-metallb-l2-config.yml
+
+- name: Uninstall MetalLB L2 configuration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    metallb_namespace: "{{ lookup('env', 'METALLB_NAMESPACE') | default('metallb-system', true) }}"
+    metallb_ipaddresspool_name: "{{ lookup('env', 'METALLB_IPADDRESSPOOL_NAME') | default('default-address-pool', true) }}"
+    metallb_l2advertisement_name: "{{ lookup('env', 'METALLB_L2ADVERTISEMENT_NAME') | default('default-l2-advertisement', true) }}"
+
+  tasks:
+    - name: Delete MetalLB L2Advertisement
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: "{{ metallb_l2advertisement_name }}"
+            namespace: "{{ metallb_namespace }}"
+      failed_when: false
+
+    - name: Delete MetalLB IPAddressPool
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: "{{ metallb_ipaddresspool_name }}"
+            namespace: "{{ metallb_namespace }}"
+      failed_when: false
+
+    - name: Display MetalLB L2 configuration uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ MetalLB L2 configuration uninstall requested."
+          - "Namespace: {{ metallb_namespace }}"
+          - "IPAddressPool: {{ metallb_ipaddresspool_name }}"
+          - "L2Advertisement: {{ metallb_l2advertisement_name }}"

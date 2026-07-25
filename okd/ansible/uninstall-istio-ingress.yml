@@ -1,0 +1,38 @@
+---
+# Ansible playbook to uninstall Istio ingress gateway Helm release
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-ingress.yml
+
+- name: Uninstall Istio ingress gateway
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_ingress_namespace: "{{ lookup('env', 'ISTIO_INGRESS_NAMESPACE') | default('istio-ingress', true) }}"
+    istio_ingress_release: "{{ lookup('env', 'ISTIO_INGRESS_RELEASE') | default('istio-ingress', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Uninstall Istio ingress gateway Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ istio_ingress_release }}
+          --namespace {{ istio_ingress_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: istio_ingress_uninstall
+      changed_when: "'uninstalled' in istio_ingress_uninstall.stdout | lower"
+
+    - name: Display Istio ingress uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio ingress gateway uninstall requested."
+          - "Release: {{ istio_ingress_release }}"
+          - "Namespace: {{ istio_ingress_namespace }}"

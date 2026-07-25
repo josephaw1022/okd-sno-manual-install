@@ -1,0 +1,29 @@
+---
+# Ansible playbook to remove Istio IngressClass resource
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-ingress-class.yml
+
+- name: Uninstall Istio ingress class
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_ingress_class_name: "{{ lookup('env', 'ISTIO_INGRESS_CLASS_NAME') | default('istio', true) }}"
+
+  tasks:
+    - name: Remove IngressClass for Istio ingress controller
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: IngressClass
+          metadata:
+            name: "{{ istio_ingress_class_name }}"
+
+    - name: Display Istio ingress class uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio ingress class uninstall requested."
+          - "IngressClass: {{ istio_ingress_class_name }}"

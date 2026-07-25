@@ -1,0 +1,54 @@
+---
+# Ansible playbook to uninstall Istio CNI Helm release
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-cni.yml
+
+- name: Uninstall Istio CNI
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istio_cni_release: "{{ lookup('env', 'ISTIO_CNI_RELEASE') | default('istio-cni', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Uninstall Istio CNI Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ istio_cni_release }}
+          --namespace {{ istio_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: istio_cni_uninstall
+      changed_when: "'uninstalled' in istio_cni_uninstall.stdout | lower"
+
+    - name: Remove privileged SCC from Istio CNI service account
+      ansible.builtin.command:
+        cmd: oc adm policy remove-scc-from-user privileged -z istio-cni -n {{ istio_namespace }}
+      register: istio_cni_scc_remove
+      changed_when: "'removed' in istio_cni_scc_remove.stdout"
+      failed_when: false
+
+    - name: Remove Istio CNI SCC cluster role binding
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: istio-cni-scc-privileged
+
+    - name: Display Istio CNI uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio CNI uninstall requested."
+          - "Release: {{ istio_cni_release }}"
+          - "Namespace: {{ istio_namespace }}"

@@ -1,0 +1,38 @@
+---
+# Ansible playbook to uninstall Istio base Helm chart
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-crds.yml
+
+- name: Uninstall Istio base chart
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istio_base_release: "{{ lookup('env', 'ISTIO_BASE_RELEASE') | default('istio-base', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Uninstall Istio base Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ istio_base_release }}
+          --namespace {{ istio_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: istio_base_uninstall
+      changed_when: "'uninstalled' in istio_base_uninstall.stdout | lower"
+
+    - name: Display Istio base uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio base chart uninstall requested."
+          - "Release: {{ istio_base_release }}"
+          - "Namespace: {{ istio_namespace }}"

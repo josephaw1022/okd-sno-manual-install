@@ -1,0 +1,77 @@
+---
+# Ansible playbook to install Istio base chart (CRDs and cluster-scoped resources)
+# Usage: ansible-playbook -i inventory.yml install-istio-crds.yml
+
+- name: Install Istio base chart
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istio_repo_name: "{{ lookup('env', 'ISTIO_HELM_REPO_NAME') | default('istio', true) }}"
+    istio_repo_url: "{{ lookup('env', 'ISTIO_HELM_REPO_URL') | default('https://istio-release.storage.googleapis.com/charts', true) }}"
+    istio_base_release: "{{ lookup('env', 'ISTIO_BASE_RELEASE') | default('istio-base', true) }}"
+    istio_chart_version: "{{ lookup('env', 'ISTIO_CHART_VERSION') | default('', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Istio Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add {{ istio_repo_name }} {{ istio_repo_url }}
+      register: istio_repo_add
+      changed_when: "'has been added' in istio_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Istio Helm repo
+      ansible.builtin.command:
+        cmd: helm repo update {{ istio_repo_name }}
+      changed_when: false
+
+    - name: Build Helm command for Istio base chart
+      ansible.builtin.set_fact:
+        istio_base_helm_cmd: >-
+          helm upgrade --install {{ istio_base_release }} {{ istio_repo_name }}/base
+          --namespace {{ istio_namespace }}
+          --create-namespace
+          --wait
+          --timeout 10m
+          {{ ('--version ' ~ istio_chart_version) if (istio_chart_version | length > 0) else '' }}
+
+    - name: Install or upgrade Istio base chart
+      ansible.builtin.command:
+        cmd: "{{ istio_base_helm_cmd }}"
+      register: istio_base_install
+      changed_when: "'STATUS: deployed' in istio_base_install.stdout or 'STATUS: pending-upgrade' in istio_base_install.stdout"
+
+    - name: Wait for Istio CRD to be established
+      ansible.builtin.command:
+        cmd: oc wait --for=condition=Established crd/virtualservices.networking.istio.io --timeout=180s
+      changed_when: false
+
+    - name: Display Istio base install status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio base chart installed."
+          - "Release: {{ istio_base_release }}"
+          - "Namespace: {{ istio_namespace }}"

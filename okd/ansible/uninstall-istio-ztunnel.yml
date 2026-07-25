@@ -1,0 +1,47 @@
+---
+# Ansible playbook to uninstall ztunnel Helm release
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-ztunnel.yml
+
+- name: Uninstall Istio ztunnel
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istio_ztunnel_release: "{{ lookup('env', 'ISTIO_ZTUNNEL_RELEASE') | default('ztunnel', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Uninstall ztunnel Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ istio_ztunnel_release }}
+          --namespace {{ istio_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: istio_ztunnel_uninstall
+      changed_when: "'uninstalled' in istio_ztunnel_uninstall.stdout | lower"
+
+    - name: Remove ztunnel SCC cluster role binding
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: ztunnel-scc-privileged
+
+    - name: Display ztunnel uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ ztunnel uninstall requested."
+          - "Release: {{ istio_ztunnel_release }}"
+          - "Namespace: {{ istio_namespace }}"

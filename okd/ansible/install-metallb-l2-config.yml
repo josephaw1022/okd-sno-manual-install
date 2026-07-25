@@ -1,0 +1,74 @@
+---
+# Ansible playbook to install MetalLB IPAddressPool and L2Advertisement resources
+# Usage: ansible-playbook -i inventory.yml install-metallb-l2-config.yml
+
+- name: Install MetalLB L2 configuration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    metallb_namespace: "{{ lookup('env', 'METALLB_NAMESPACE') | default('metallb-system', true) }}"
+    metallb_address_range: "{{ lookup('env', 'METALLB_ADDRESS_RANGE') | default('192.168.1.230-192.168.1.249', true) }}"
+    metallb_ipaddresspool_name: "{{ lookup('env', 'METALLB_IPADDRESSPOOL_NAME') | default('default-address-pool', true) }}"
+    metallb_l2advertisement_name: "{{ lookup('env', 'METALLB_L2ADVERTISEMENT_NAME') | default('default-l2-advertisement', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure MetalLB namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ metallb_namespace }}"
+
+    - name: Apply MetalLB IPAddressPool
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: "{{ metallb_ipaddresspool_name }}"
+            namespace: "{{ metallb_namespace }}"
+          spec:
+            addresses:
+              - "{{ metallb_address_range }}"
+
+    - name: Apply MetalLB L2Advertisement
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: "{{ metallb_l2advertisement_name }}"
+            namespace: "{{ metallb_namespace }}"
+          spec:
+            ipAddressPools:
+              - "{{ metallb_ipaddresspool_name }}"
+
+    - name: Display MetalLB L2 configuration status
+      ansible.builtin.debug:
+        msg:
+          - "✅ MetalLB L2 configuration installed."
+          - "Namespace: {{ metallb_namespace }}"
+          - "IPAddressPool: {{ metallb_ipaddresspool_name }} ({{ metallb_address_range }})"
+          - "L2Advertisement: {{ metallb_l2advertisement_name }}"

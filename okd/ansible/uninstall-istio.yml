@@ -1,0 +1,38 @@
+---
+# Ansible playbook to uninstall Istiod Helm release
+# Usage: ansible-playbook -i inventory.yml uninstall-istio.yml
+
+- name: Uninstall Istiod ambient control plane
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istiod_release: "{{ lookup('env', 'ISTIOD_RELEASE') | default('istiod', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Uninstall Istiod Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ istiod_release }}
+          --namespace {{ istio_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: istiod_uninstall
+      changed_when: "'uninstalled' in istiod_uninstall.stdout | lower"
+
+    - name: Display Istiod uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istiod uninstall requested."
+          - "Release: {{ istiod_release }}"
+          - "Namespace: {{ istio_namespace }}"

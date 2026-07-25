@@ -1,0 +1,125 @@
+---
+# Ansible playbook to install MetalLB via Helm on OpenShift/OKD
+# Usage: ansible-playbook -i inventory.yml install-metallb.yml
+
+- name: Install MetalLB via Helm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    metallb_namespace: "{{ lookup('env', 'METALLB_NAMESPACE') | default('metallb-system', true) }}"
+    metallb_repo_name: "{{ lookup('env', 'METALLB_HELM_REPO_NAME') | default('metallb', true) }}"
+    metallb_repo_url: "{{ lookup('env', 'METALLB_HELM_REPO_URL') | default('https://metallb.github.io/metallb', true) }}"
+    metallb_release_name: "{{ lookup('env', 'METALLB_HELM_RELEASE') | default('metallb', true) }}"
+    metallb_chart_version: "{{ lookup('env', 'METALLB_CHART_VERSION') | default('', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure MetalLB namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ metallb_namespace }}"
+
+    - name: Ensure MetalLB speaker SCC cluster role binding exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: metallb-speaker-scc-privileged
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:privileged
+          subjects:
+            - kind: ServiceAccount
+              name: metallb-speaker
+              namespace: "{{ metallb_namespace }}"
+
+    - name: Ensure MetalLB controller SCC cluster role binding exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: metallb-controller-scc-privileged
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:privileged
+          subjects:
+            - kind: ServiceAccount
+              name: metallb-controller
+              namespace: "{{ metallb_namespace }}"
+
+    - name: Ensure MetalLB Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add {{ metallb_repo_name }} {{ metallb_repo_url }}
+      register: metallb_repo_add
+      changed_when: "'has been added' in metallb_repo_add.stdout"
+      failed_when: false
+
+    - name: Update MetalLB Helm repo
+      ansible.builtin.command:
+        cmd: helm repo update {{ metallb_repo_name }}
+      changed_when: false
+
+    - name: Build Helm command for MetalLB install
+      ansible.builtin.set_fact:
+        metallb_helm_cmd: >-
+          helm upgrade --install {{ metallb_release_name }} {{ metallb_repo_name }}/metallb
+          --namespace {{ metallb_namespace }}
+          --create-namespace
+          --wait
+          --timeout 10m
+          {{ ('--version ' ~ metallb_chart_version) if (metallb_chart_version | length > 0) else '' }}
+
+    - name: Install or upgrade MetalLB Helm release
+      ansible.builtin.command:
+        cmd: "{{ metallb_helm_cmd }}"
+      register: metallb_install
+      changed_when: "'STATUS: deployed' in metallb_install.stdout or 'STATUS: pending-upgrade' in metallb_install.stdout"
+
+    - name: Wait for MetalLB controller deployment
+      ansible.builtin.command:
+        cmd: oc rollout status deployment/metallb-controller -n {{ metallb_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Wait for MetalLB speaker daemonset
+      ansible.builtin.command:
+        cmd: oc rollout status daemonset/metallb-speaker -n {{ metallb_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Display MetalLB installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ MetalLB Helm release installed."
+          - "Release: {{ metallb_release_name }}"
+          - "Namespace: {{ metallb_namespace }}"

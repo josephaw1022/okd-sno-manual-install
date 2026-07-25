@@ -1,0 +1,67 @@
+---
+# Ansible playbook to uninstall Gateway API CRDs
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-gateway-api-crds.yml
+
+- name: Uninstall Gateway API CRDs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    gateway_api_crds_url: >-
+      {{
+        lookup('env', 'GATEWAY_API_CRDS_URL')
+        | default('https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml', true)
+      }}
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Detect existing GatewayClass CRD manager
+      ansible.builtin.command:
+        cmd: oc get crd gatewayclasses.gateway.networking.k8s.io -o jsonpath={.metadata.managedFields[0].manager}
+      register: gatewayclass_crd_manager
+      changed_when: false
+      failed_when: false
+
+    - name: Check if GatewayClass CRD exists
+      ansible.builtin.command:
+        cmd: oc get crd gatewayclasses.gateway.networking.k8s.io
+      register: gatewayclass_crd_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Delete Gateway API CRDs manifest when not OpenShift-operator managed
+      ansible.builtin.command:
+        cmd: oc delete -f {{ gateway_api_crds_url }} --ignore-not-found=true
+      register: gateway_api_delete
+      changed_when: "'deleted' in gateway_api_delete.stdout"
+      failed_when: false
+      when: not (gatewayclass_crd_exists.rc == 0 and (gatewayclass_crd_manager.stdout | trim) == 'ingress-operator')
+
+    - name: Skip delete when OpenShift Ingress Operator manages Gateway API CRDs
+      ansible.builtin.debug:
+        msg:
+          - "ℹ️ Gateway API CRDs are managed by OpenShift Ingress Operator; skipping deletion."
+          - "Detected manager: {{ gatewayclass_crd_manager.stdout | trim }}"
+      when: gatewayclass_crd_exists.rc == 0 and (gatewayclass_crd_manager.stdout | trim) == 'ingress-operator'
+
+    - name: Display Gateway API uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Gateway API CRD uninstall requested."
+          - "Source: {{ gateway_api_crds_url }}"

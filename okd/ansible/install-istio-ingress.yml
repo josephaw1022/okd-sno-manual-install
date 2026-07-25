@@ -1,0 +1,79 @@
+---
+# Ansible playbook to install Istio ingress gateway via Helm
+# Usage: ansible-playbook -i inventory.yml install-istio-ingress.yml
+
+- name: Install Istio ingress gateway
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_ingress_namespace: "{{ lookup('env', 'ISTIO_INGRESS_NAMESPACE') | default('istio-ingress', true) }}"
+    istio_repo_name: "{{ lookup('env', 'ISTIO_HELM_REPO_NAME') | default('istio', true) }}"
+    istio_repo_url: "{{ lookup('env', 'ISTIO_HELM_REPO_URL') | default('https://istio-release.storage.googleapis.com/charts', true) }}"
+    istio_ingress_release: "{{ lookup('env', 'ISTIO_INGRESS_RELEASE') | default('istio-ingress', true) }}"
+    istio_chart_version: "{{ lookup('env', 'ISTIO_CHART_VERSION') | default('', true) }}"
+    istio_global_platform: "{{ lookup('env', 'ISTIO_GLOBAL_PLATFORM') | default('openshift', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Istio Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add {{ istio_repo_name }} {{ istio_repo_url }}
+      register: istio_repo_add
+      changed_when: "'has been added' in istio_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Istio Helm repo
+      ansible.builtin.command:
+        cmd: helm repo update {{ istio_repo_name }}
+      changed_when: false
+
+    - name: Build Helm command for Istio ingress gateway install
+      ansible.builtin.set_fact:
+        istio_ingress_helm_cmd: >-
+          helm upgrade --install {{ istio_ingress_release }} {{ istio_repo_name }}/gateway
+          --namespace {{ istio_ingress_namespace }}
+          --create-namespace
+          --set global.platform={{ istio_global_platform }}
+          --wait
+          --timeout 10m
+          {{ ('--version ' ~ istio_chart_version) if (istio_chart_version | length > 0) else '' }}
+
+    - name: Install or upgrade Istio ingress gateway release
+      ansible.builtin.command:
+        cmd: "{{ istio_ingress_helm_cmd }}"
+      register: istio_ingress_install
+      changed_when: "'STATUS: deployed' in istio_ingress_install.stdout or 'STATUS: pending-upgrade' in istio_ingress_install.stdout"
+
+    - name: Wait for Istio ingress deployment to be available
+      ansible.builtin.command:
+        cmd: oc rollout status deployment/{{ istio_ingress_release }} -n {{ istio_ingress_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Display Istio ingress install status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio ingress gateway installed."
+          - "Release: {{ istio_ingress_release }}"
+          - "Namespace: {{ istio_ingress_namespace }}"
