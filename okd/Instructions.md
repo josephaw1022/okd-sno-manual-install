@@ -264,10 +264,7 @@ Then on the OKD side, create an oauth resource using the `entraid-oauth.yaml` fi
 #### 1. Generate Cert (DNS-01)
 
 ```bash
-sudo certbot certonly \
-  --manual \
-  --preferred-challenges dns \
-  -d "*.apps.okd.kubesoar.com"
+make create-ingress-cert
 ```
 
 Add the TXT record in your DNS → wait for propagation.
