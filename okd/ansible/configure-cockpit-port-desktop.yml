@@ -1,0 +1,63 @@
+---
+# Configure Cockpit port to 443 on desktop-server
+# Usage: ansible-playbook -i inventory.yml configure-cockpit-port-desktop.yml
+
+- name: Configure Cockpit port to 443 on desktop-server
+  hosts: libvirt_hosts
+  become: true
+  tasks:
+    - name: Ensure drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/cockpit.socket.d
+        state: directory
+        mode: '0755'
+
+    - name: Create drop-in configuration for port 443
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cockpit.socket.d/listen.conf
+        content: |
+          [Socket]
+          ListenStream=
+          ListenStream=443
+        mode: '0644'
+      notify:
+        - Reload systemd daemon
+        - Restart cockpit socket
+
+    - name: Configure SELinux to allow Cockpit on port 443 (using seport module)
+      community.general.seport:
+        ports: 443
+        proto: tcp
+        setype: websm_port_t
+        state: present
+      failed_when: false
+      register: seport_result
+
+    - name: Fallback SELinux semanage command (modify)
+      ansible.builtin.command: semanage port -m -t websm_port_t -p tcp 443
+      register: semanage_modify
+      failed_when: false
+      when: seport_result is failed or (seport_result.rc is defined and seport_result.rc != 0)
+
+    - name: Fallback SELinux semanage command (add)
+      ansible.builtin.command: semanage port -a -t websm_port_t -p tcp 443
+      failed_when: false
+      when: (seport_result is failed or (seport_result.rc is defined and seport_result.rc != 0)) and semanage_modify.rc != 0
+
+    - name: Allow port 443 in firewalld
+      ansible.builtin.firewalld:
+        port: 443/tcp
+        permanent: true
+        state: enabled
+        immediate: true
+      failed_when: false
+
+  handlers:
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart cockpit socket
+      ansible.builtin.systemd:
+        name: cockpit.socket
+        state: restarted

@@ -1,0 +1,64 @@
+---
+# Transfer Let's Encrypt certificate for desktop-server.kubesoar.com to Cockpit
+# Usage: ansible-playbook -i inventory.yml transfer-cockpit-cert-desktop.yml
+
+- name: Transfer Certificate to desktop-server Cockpit
+  hosts: libvirt_hosts
+  become: true
+  vars:
+    cert_domain: "desktop-server.kubesoar.com"
+    letsencrypt_dir: "/etc/letsencrypt/live/{{ cert_domain }}"
+  tasks:
+    - name: Read certificate file from local laptop
+      ansible.builtin.slurp:
+        src: "{{ letsencrypt_dir }}/fullchain.pem"
+      register: cert_content
+      delegate_to: localhost
+      become: true
+
+    - name: Read private key file from local laptop
+      ansible.builtin.slurp:
+        src: "{{ letsencrypt_dir }}/privkey.pem"
+      register: key_content
+      delegate_to: localhost
+      become: true
+      no_log: true
+
+    - name: Ensure Cockpit certificates directory exists
+      ansible.builtin.file:
+        path: /etc/cockpit/ws-certs.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Write certificate file to Cockpit certs directory
+      ansible.builtin.copy:
+        content: "{{ cert_content.content | b64decode }}"
+        dest: "/etc/cockpit/ws-certs.d/{{ cert_domain }}.crt"
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Restart Cockpit
+
+    - name: Write private key file to Cockpit certs directory
+      ansible.builtin.copy:
+        content: "{{ key_content.content | b64decode }}"
+        dest: "/etc/cockpit/ws-certs.d/{{ cert_domain }}.key"
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      notify: Restart Cockpit
+
+    - name: Remove default self-signed cert to ensure custom cert is used
+      ansible.builtin.file:
+        path: /etc/cockpit/ws-certs.d/0-self-signed.cert
+        state: absent
+      notify: Restart Cockpit
+
+  handlers:
+    - name: Restart Cockpit
+      ansible.builtin.systemd:
+        name: cockpit
+        state: restarted

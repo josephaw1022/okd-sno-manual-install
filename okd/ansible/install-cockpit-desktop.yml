@@ -1,0 +1,29 @@
+---
+# Install Cockpit and extensions on desktop-server
+# Usage: ansible-playbook -i inventory.yml install-cockpit-desktop.yml
+
+- name: Install Cockpit on desktop-server
+  hosts: libvirt_hosts
+  become: true
+  tasks:
+    - name: Install Cockpit and VM/Container extensions
+      ansible.builtin.package:
+        name:
+          - cockpit
+          - cockpit-machines
+          - cockpit-podman
+        state: present
+
+    - name: Start and enable Cockpit socket
+      ansible.builtin.systemd:
+        name: cockpit.socket
+        state: started
+        enabled: true
+
+    - name: Allow Cockpit service in firewalld
+      ansible.builtin.firewalld:
+        service: cockpit
+        permanent: true
+        state: enabled
+        immediate: true
+      failed_when: false

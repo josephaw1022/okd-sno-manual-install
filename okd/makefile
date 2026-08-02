@@ -162,6 +162,82 @@ update-dns: ## Update Pi-hole DNS config for OKD cluster.
 	@echo "✅ DNS updated"
 
 
+##@ Cockpit Management
+
+.PHONY: install-cockpit-laptop
+install-cockpit-laptop: ## Install Cockpit and extensions on laptop-server.
+	@echo "💻 Installing Cockpit on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-cockpit-laptop.yml && \
+	popd > /dev/null
+
+.PHONY: install-cockpit-desktop
+install-cockpit-desktop: ## Install Cockpit and extensions on desktop-server.
+	@echo "💻 Installing Cockpit on desktop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml install-cockpit-desktop.yml && \
+	popd > /dev/null
+
+.PHONY: configure-cockpit-port-laptop
+configure-cockpit-port-laptop: ## Configure Cockpit to run on port 443 on laptop-server.
+	@echo "⚙️ Configuring Cockpit port to 443 on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-cockpit-port-laptop.yml && \
+	popd > /dev/null
+
+.PHONY: configure-cockpit-port-desktop
+configure-cockpit-port-desktop: ## Configure Cockpit to run on port 443 on desktop-server.
+	@echo "⚙️ Configuring Cockpit port to 443 on desktop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-cockpit-port-desktop.yml && \
+	popd > /dev/null
+
+.PHONY: create-laptop-server-cert
+create-laptop-server-cert: ## Generate Let's Encrypt cert for laptop-server.kubesoar.com using certbot container.
+	@echo "🔐 Generating Let's Encrypt certificate for laptop-server.kubesoar.com..."
+	sudo $(CONTAINER_ENGINE) run --rm -it \
+	  -v /etc/letsencrypt:/etc/letsencrypt:z \
+	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  $(CERTBOT_IMAGE) certonly \
+	  --manual \
+	  --preferred-challenges dns \
+	  -d "laptop-server.kubesoar.com"
+
+.PHONY: create-desktop-server-cert
+create-desktop-server-cert: ## Generate Let's Encrypt cert for desktop-server.kubesoar.com using certbot container.
+	@echo "🔐 Generating Let's Encrypt certificate for desktop-server.kubesoar.com..."
+	sudo $(CONTAINER_ENGINE) run --rm -it \
+	  -v /etc/letsencrypt:/etc/letsencrypt:z \
+	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  $(CERTBOT_IMAGE) certonly \
+	  --manual \
+	  --preferred-challenges dns \
+	  -d "desktop-server.kubesoar.com"
+
+.PHONY: transfer-cockpit-cert-laptop
+transfer-cockpit-cert-laptop: ## Transfer Let's Encrypt cert for laptop-server to laptop-server Cockpit.
+	@echo "📤 Transferring certificate to laptop-server Cockpit..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml transfer-cockpit-cert-laptop.yml && \
+	popd > /dev/null
+
+.PHONY: transfer-cockpit-cert-desktop
+transfer-cockpit-cert-desktop: ## Transfer Let's Encrypt cert for desktop-server to desktop-server Cockpit.
+	@echo "📤 Transferring certificate to desktop-server Cockpit..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml transfer-cockpit-cert-desktop.yml && \
+	popd > /dev/null
+
+.PHONY: setup-cockpit-laptop
+setup-cockpit-laptop: install-cockpit-laptop configure-cockpit-port-laptop create-laptop-server-cert transfer-cockpit-cert-laptop ## Complete Cockpit setup on laptop-server (install, port 443, cert generation, and cert transfer).
+
+.PHONY: setup-cockpit-desktop
+setup-cockpit-desktop: install-cockpit-desktop configure-cockpit-port-desktop create-desktop-server-cert transfer-cockpit-cert-desktop ## Complete Cockpit setup on desktop-server (install, port 443, cert generation, and cert transfer).
+
+.PHONY: setup-cockpit-all
+setup-cockpit-all: setup-cockpit-laptop setup-cockpit-desktop ## Run complete Cockpit setup for both laptop-server and desktop-server.
+
+
 ##@ ISO & Manifest Generation
 
 .PHONY: config
