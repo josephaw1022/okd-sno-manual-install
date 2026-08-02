@@ -23,7 +23,7 @@ DNS infrastructure management for the homelab and OKD cluster.
 
 ## Gotchas
 
-- **Manual VM Setup:** The Pi-hole VM (`192.168.1.5`) is NOT automated. It was manually created on the Lenovo Laptop host (`192.168.1.6`) via Cockpit.
+- **Manual VM Setup:** The Pi-hole VM (`192.168.1.5`) is NOT automated. It was manually created on the Lenovo Laptop host (`192.168.1.4`) via Cockpit.
 - **Dual Interfaces:** The Pi-hole VM uses two NICs: one for the default VM network and one for the `192.168.1.0/24` LAN.
 - **No DHCP:** Pi-hole does NOT handle DHCP; the Netgear router handles all IP assignments.
 - **Service Restart:** Updating DNS via Ansible restarts `pihole-FTL` on the VM.
