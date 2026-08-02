@@ -6,6 +6,10 @@
   hosts: pihole
   gather_facts: false
   vars:
+    pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
+    pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
+    ansible_user: "{{ pihole_ssh_username }}"
+    ansible_password: "{{ pihole_ssh_password }}"
     cluster_name: okd
     base_domain: kubesoar.com
     dnsmasq_config_file: "{{ cluster_name }}.conf"

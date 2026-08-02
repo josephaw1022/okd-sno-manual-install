@@ -31,6 +31,24 @@ NODE_DATA_POOL ?= okd-storage
 SERVER_HOST ?= 192.168.1.9
 SERVER_USER ?= root
 
+# Laptop server single-VM settings
+LAPTOP_VM_NAME ?= pihole
+LAPTOP_VM_HOSTNAME ?= pihole.kubesoar.com
+LAPTOP_VM_VCPUS ?= 2
+LAPTOP_VM_MEMORY_MB ?= 4096
+LAPTOP_VM_DISK_SIZE_GB ?= 32
+LAPTOP_VM_FEDORA_RELEASE ?= 44
+LAPTOP_VM_CLOUD_IMAGE_NAME ?= Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+LAPTOP_VM_IP ?= 192.168.1.5
+LAPTOP_VM_PREFIX ?= 24
+LAPTOP_VM_GATEWAY ?= 192.168.1.1
+LAPTOP_VM_DNS ?= 192.168.1.5
+LAPTOP_VM_MAC_ADDRESS ?= 52:54:00:00:00:06
+LAPTOP_VM_STORAGE_POOL ?= System
+PIHOLE_WEBPASSWORD ?= changeme
+PIHOLE_UPSTREAM_DNS_1 ?= 1.1.1.1
+PIHOLE_UPSTREAM_DNS_2 ?= 1.0.0.1
+
 ## OKD values
 OC_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-client-linux-$(OKD_VERSION).tar.gz
 INSTALLER_URL = https://github.com/okd-project/okd/releases/download/$(OKD_VERSION)/openshift-install-linux-$(OKD_VERSION).tar.gz
@@ -86,6 +104,62 @@ fcos: ## Download the FCOS ISO (for reference, agent-iso creates its own).
 	[ -n "$$ISO_URL" ] || { echo "❌ No ISO URL found"; exit 1; }; \
 	echo "➡️  $$ISO_URL"; \
 	curl -L "$$ISO_URL" -o fcos-live.iso
+
+
+##@ Pi-hole & DNS
+
+.PHONY: create-dns-server-vm-on-laptop-server
+create-dns-server-vm-on-laptop-server: ## Create DNS server VM on laptop-server (192.168.1.4) via Ansible.
+	@echo "💻 Creating DNS server VM on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-dns-server-vm-on-laptop-server.yml \
+	  -e "laptop_vm_name=$(LAPTOP_VM_NAME)" \
+	  -e "laptop_vm_hostname=$(LAPTOP_VM_HOSTNAME)" \
+	  -e "laptop_vm_vcpus=$(LAPTOP_VM_VCPUS)" \
+	  -e "laptop_vm_memory_mb=$(LAPTOP_VM_MEMORY_MB)" \
+	  -e "laptop_vm_disk_size_gb=$(LAPTOP_VM_DISK_SIZE_GB)" \
+	  -e "laptop_vm_fedora_release=$(LAPTOP_VM_FEDORA_RELEASE)" \
+	  -e "laptop_vm_cloud_image_name=$(LAPTOP_VM_CLOUD_IMAGE_NAME)" \
+	  -e "laptop_vm_ip=$(LAPTOP_VM_IP)" \
+	  -e "laptop_vm_prefix=$(LAPTOP_VM_PREFIX)" \
+	  -e "laptop_vm_gateway=$(LAPTOP_VM_GATEWAY)" \
+	  -e "laptop_vm_dns=$(LAPTOP_VM_DNS)" \
+	  -e "laptop_vm_mac_address=$(LAPTOP_VM_MAC_ADDRESS)" \
+	  -e "laptop_vm_storage_pool=$(LAPTOP_VM_STORAGE_POOL)" && \
+	popd > /dev/null
+	@echo "✅ DNS server VM created (or already present)"
+
+
+.PHONY: delete-dns-server-vm-on-laptop-server
+delete-dns-server-vm-on-laptop-server: ## Delete DNS server VM on laptop-server (192.168.1.4) via Ansible.
+	@echo "🗑️ Deleting DNS server VM on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml delete-dns-server-vm-on-laptop-server.yml \
+	  -e "laptop_vm_name=$(LAPTOP_VM_NAME)" \
+	  -e "laptop_vm_storage_pool=$(LAPTOP_VM_STORAGE_POOL)" && \
+	popd > /dev/null
+	@echo "✅ DNS server VM deleted (if present)"
+
+
+.PHONY: install-pihole-on-dns-server-vm
+install-pihole-on-dns-server-vm: ## Install Pi-hole on the DNS server VM (pihole-server).
+	@echo "🧩 Installing Pi-hole on DNS server VM..."
+	@pushd ansible > /dev/null && \
+	PIHOLE_WEBPASSWORD=$(PIHOLE_WEBPASSWORD) \
+	ansible-playbook -i inventory.yml install-pihole-on-dns-server-vm.yml \
+	  -e "pihole_upstream_dns_1=$(PIHOLE_UPSTREAM_DNS_1)" \
+	  -e "pihole_upstream_dns_2=$(PIHOLE_UPSTREAM_DNS_2)" && \
+	popd > /dev/null
+	@echo "✅ Pi-hole installation complete"
+
+
+.PHONY: update-dns
+update-dns: ## Update Pi-hole DNS config for OKD cluster.
+	@echo "🌐 Updating Pi-hole DNS configuration..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml update-pihole-dns.yml && \
+	popd > /dev/null
+	@echo "✅ DNS updated"
 
 
 ##@ ISO & Manifest Generation
@@ -409,16 +483,7 @@ reboot-non-bootstrap: ## Reboot master-1 and master-2 (non-bootstrap nodes).
 	@echo "✅ Non-bootstrap nodes rebooted"
 
 
-##@ Infrastructure (DNS, Load Balancer)
-
-.PHONY: update-dns
-update-dns: ## Update Pi-hole DNS config for OKD cluster.
-	@echo "🌐 Updating Pi-hole DNS configuration..."
-	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml update-pihole-dns.yml && \
-	popd > /dev/null
-	@echo "✅ DNS updated"
-
+##@ Infrastructure (Load Balancer)
 
 .PHONY: create-lb
 create-lb: ## Create nginx load balancer container on macvlan network.
@@ -482,6 +547,22 @@ ansible-deps: ## Install Ansible Galaxy collection dependencies.
 	ansible-galaxy install -r requirements.yml && \
 	popd > /dev/null
 	@echo "✅ Ansible dependencies installed"
+
+
+CONTAINER_ENGINE ?= podman
+CERTBOT_IMAGE ?= docker.io/certbot/certbot:latest
+
+.PHONY: create-ingress-cert
+create-ingress-cert: ## Generate Let's Encrypt wildcard cert using certbot container (DNS-01 challenge).
+	@echo "🔐 Generating Let's Encrypt wildcard certificate for *.apps.$(CLUSTER_NAME).$(BASE_DOMAIN) using $(CONTAINER_ENGINE)..."
+	sudo $(CONTAINER_ENGINE) run --rm -it \
+	  -v /etc/letsencrypt:/etc/letsencrypt:z \
+	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  $(CERTBOT_IMAGE) certonly \
+	  --manual \
+	  --preferred-challenges dns \
+	  -d "*.apps.$(CLUSTER_NAME).$(BASE_DOMAIN)"
+	@echo "✅ Certificate generated. Run 'make apply-ingress-cert' to apply it to OKD ingress."
 
 
 .PHONY: apply-ingress-cert

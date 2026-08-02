@@ -1,0 +1,151 @@
+---
+# Ansible playbook to install Pi-hole on the DNS server VM
+# Usage: ansible-playbook -i inventory.yml install-pihole-on-dns-server-vm.yml
+
+- name: Install Pi-hole on DNS server VM
+  hosts: pihole
+  gather_facts: false
+  vars:
+    pihole_admin_password: "{{ lookup('env', 'PIHOLE_WEBPASSWORD') | default(pihole_web_password, true) | default('changeme', true) }}"
+    pihole_upstream_dns_1: 1.1.1.1
+    pihole_upstream_dns_2: 1.0.0.1
+
+  tasks:
+    - name: Wait for SSH on DNS server VM
+      ansible.builtin.wait_for_connection:
+        timeout: 3000
+
+    - name: Gather host facts
+      ansible.builtin.setup:
+
+    - name: Ensure temporary upstream DNS resolvers are configured
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        mode: "0644"
+        content: |
+          nameserver {{ pihole_upstream_dns_1 }}
+          nameserver {{ pihole_upstream_dns_2 }}
+          options timeout:2 attempts:2
+
+    - name: Check if curl is installed
+      ansible.builtin.command:
+        cmd: command -v curl
+      register: curl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install curl only when missing
+      ansible.builtin.package:
+        name: curl
+        state: present
+      when: curl_check.rc != 0
+
+    - name: Download Pi-hole installer script locally on VM
+      ansible.builtin.get_url:
+        url: https://install.pi-hole.net
+        dest: /tmp/pihole-install.sh
+        mode: "0755"
+
+    - name: Patch Pi-hole installer for non-interactive automation
+      ansible.builtin.shell:
+        cmd: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path('/tmp/pihole-install.sh')
+          text = p.read_text()
+          if 'dialog(){ return 0; }' not in text:
+              text = text.replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ndialog(){ return 0; }\n')
+          text = text.replace('\n        welcomeDialogs\n', '\n        echo "Skipping welcome dialogs during automation"\n')
+          text = text.replace('\n        chooseInterface\n', '\n        echo "Skipping interactive interface selection during automation"\n')
+          text = text.replace('\n        setDNS\n', '\n        echo "Skipping interactive DNS selection during automation"\n')
+          text = text.replace('\n        chooseBlocklists\n', '\n        echo "Skipping interactive blocklist selection during automation"\n')
+          text = text.replace('\n        setLogging\n', '\n        echo "Skipping interactive logging selection during automation"\n')
+          text = text.replace('\n        setPrivacyLevel\n', '\n        echo "Skipping interactive privacy selection during automation"\n')
+          text = text.replace('\n    runGravity\n', '\n    echo "Skipping initial gravity run during automation"\n')
+          text = re.sub(
+              r'dialog --no-shadow --keep-tite \\\n.*?\n\s*"\$\{r\}" "\$\{c\}"',
+              'true',
+              text,
+              flags=re.S
+          )
+          p.write_text(text)
+          PY
+      changed_when: false
+
+    - name: Ensure Pi-hole is installed (unattended)
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          export PIHOLE_SKIP_OS_CHECK=true
+          export PIHOLE_SELINUX=true
+          export PIHOLE_INTERFACE="{{ ansible_default_ipv4.interface }}"
+          export IPV4_ADDRESS="{{ ansible_host }}/24"
+          export PIHOLE_DNS_1="{{ pihole_upstream_dns_1 }}"
+          export PIHOLE_DNS_2="{{ pihole_upstream_dns_2 }}"
+          export DNSMASQ_LISTENING=all
+          export QUERY_LOGGING=true
+          export WEBPASSWORD="{{ pihole_admin_password }}"
+          bash /tmp/pihole-install.sh --unattended 2>&1 | tee /tmp/pihole-install-run.log
+      args:
+        creates: /etc/pihole/setupVars.conf
+      register: pihole_install_run
+
+    - name: Show Pi-hole installer logs
+      ansible.builtin.debug:
+        var: pihole_install_run.stdout_lines
+      when: pihole_install_run is defined
+
+    - name: Set Pi-hole admin password
+      ansible.builtin.command:
+        cmd: "pihole setpassword {{ pihole_admin_password }}"
+      no_log: true
+
+    - name: Ensure Pi-hole loads /etc/dnsmasq.d custom snippets
+      ansible.builtin.lineinfile:
+        path: /etc/pihole/pihole.toml
+        regexp: '^\s*etc_dnsmasq_d\s*='
+        line: "  etc_dnsmasq_d = true"
+        create: false
+      register: pihole_etc_dnsmasq_d
+
+    - name: Rebuild Pi-hole gravity database
+      ansible.builtin.command:
+        cmd: pihole -g
+
+    - name: Ensure pihole-FTL service is enabled and running
+      ansible.builtin.service:
+        name: pihole-FTL
+        enabled: true
+        state: started
+
+    - name: Check whether lighttpd service exists
+      ansible.builtin.command:
+        cmd: systemctl list-unit-files lighttpd.service --no-legend
+      register: lighttpd_service_check
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure lighttpd service is enabled and running when present
+      ansible.builtin.service:
+        name: lighttpd
+        enabled: true
+        state: started
+      when: lighttpd_service_check.rc == 0 and lighttpd_service_check.stdout | trim != ""
+
+    - name: Verify Pi-hole API is reachable
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}/admin/api.php?summaryRaw"
+        method: GET
+        return_content: true
+      register: pihole_api_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show Pi-hole install details
+      ansible.builtin.debug:
+        msg:
+          - "Pi-hole installed on {{ inventory_hostname }} ({{ ansible_host }})"
+          - "Web UI: http://{{ ansible_host }}/admin"
+          - "DNS upstreams: {{ pihole_upstream_dns_1 }}, {{ pihole_upstream_dns_2 }}"
+          - "API check status: {{ pihole_api_check.status }}"

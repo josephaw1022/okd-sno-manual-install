@@ -2,7 +2,7 @@ all:
   vars:
     ansible_user: jwhiteaker
     ansible_python_interpreter: /usr/bin/python3
-    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
   children:
     libvirt_hosts:
       vars:
@@ -19,6 +19,14 @@ all:
           vm_network: default
           # Set this to your physical interface for bridged networking
           # vm_bridge_interface: enp3s0
+    laptop_libvirt_hosts:
+      vars:
+        ansible_become: true
+        ansible_become_method: sudo
+      hosts:
+        laptop-server:
+          ansible_host: 192.168.1.4
+          iso_dest_path: /var/lib/libvirt/images
     pihole:
       vars:
         ansible_become: true
@@ -26,4 +34,6 @@ all:
       hosts:
         pihole-server:
           ansible_host: 192.168.1.5
+          ansible_user: fedora
+          ansible_password: changeme
           dnsmasq_conf_dir: /etc/dnsmasq.d

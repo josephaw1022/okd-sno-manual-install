@@ -1,0 +1,71 @@
+---
+# Ansible playbook to delete the DNS server VM on laptop-server libvirt host
+# Usage: ansible-playbook -i inventory.yml delete-dns-server-vm-on-laptop-server.yml
+
+- name: Delete DNS server VM on laptop-server
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    laptop_vm_name: pihole
+    laptop_vm_storage_pool: System
+
+  tasks:
+    - name: Get storage pool path
+      ansible.builtin.shell:
+        cmd: |
+          virsh pool-dumpxml "{{ laptop_vm_storage_pool }}" | awk -F'[<>]' '/<path>/{print $3; exit}'
+      register: storage_pool_path
+      changed_when: false
+
+    - name: Fail when storage pool path is not detected
+      ansible.builtin.fail:
+        msg: >-
+          Could not resolve path for libvirt storage pool '{{ laptop_vm_storage_pool }}'.
+          Verify the pool exists (`virsh pool-list --all`).
+      when: storage_pool_path.stdout | trim == ""
+
+    - name: Check whether VM exists
+      ansible.builtin.command:
+        cmd: "virsh dominfo {{ laptop_vm_name }}"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Force stop VM if present
+      ansible.builtin.command:
+        cmd: "virsh destroy {{ laptop_vm_name }}"
+      when: vm_exists.rc == 0
+      failed_when: false
+
+    - name: Undefine VM and remove NVRAM if present
+      ansible.builtin.command:
+        cmd: "virsh undefine {{ laptop_vm_name }} --nvram"
+      when: vm_exists.rc == 0
+      register: undefine_result
+      failed_when: false
+      changed_when: "'Domain ' in undefine_result.stdout or 'has been undefined' in undefine_result.stderr"
+
+    - name: Undefine VM without NVRAM fallback
+      ansible.builtin.command:
+        cmd: "virsh undefine {{ laptop_vm_name }}"
+      when: vm_exists.rc == 0 and undefine_result.rc != 0
+      failed_when: false
+
+    - name: Delete VM artifacts
+      ansible.builtin.file:
+        path: "{{ storage_pool_path.stdout | trim }}/{{ item }}"
+        state: absent
+      loop:
+        - "{{ laptop_vm_name }}.qcow2"
+        - "{{ laptop_vm_name }}-seed.iso"
+        - "{{ laptop_vm_name }}-user-data"
+        - "{{ laptop_vm_name }}-meta-data"
+        - "{{ laptop_vm_name }}-network-config"
+
+    - name: Show VM deletion result
+      ansible.builtin.debug:
+        msg:
+          - "Target host: laptop-server"
+          - "VM name: {{ laptop_vm_name }}"
+          - "Storage pool: {{ laptop_vm_storage_pool }} ({{ storage_pool_path.stdout | trim }})"
+          - "{{ 'VM deleted and local artifacts removed.' if vm_exists.rc == 0 else 'VM not found; artifact cleanup still applied.' }}"
