@@ -422,7 +422,18 @@ approve-csrs: ## Approve pending CSRs for nodes.
 ##@ Remote Access & Authentication
 
 TAILSCALE_EXIT_NODE ?= 100.110.200.108
+TAILSCALE_ADVERTISED_ROUTES ?= 192.168.1.0/24
 OKD_API_URL ?= https://api.$(CLUSTER_NAME).$(BASE_DOMAIN):6443
+
+.PHONY: configure-tailscale-laptop setup-tailscale-laptop
+configure-tailscale-laptop: ## Configure laptop-server as Tailscale exit node & subnet router via Ansible.
+	@echo "⚙️ Configuring laptop-server as Tailscale exit node and subnet router..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-tailscale-laptop.yml \
+	  -e "tailscale_advertised_routes=$(TAILSCALE_ADVERTISED_ROUTES)" && \
+	popd > /dev/null
+
+setup-tailscale-laptop: configure-tailscale-laptop
 
 .PHONY: tailscale-up tailscale
 tailscale-up: ## Connect to Tailscale with exit node and accept routes.
@@ -430,6 +441,17 @@ tailscale-up: ## Connect to Tailscale with exit node and accept routes.
 	tailscale up --exit-node=$(TAILSCALE_EXIT_NODE) --accept-routes
 
 tailscale: tailscale-up
+
+.PHONY: tailscale-down tailscale-disconnect
+tailscale-down: ## Disconnect exit node from Tailscale.
+	@echo "🔌 Disconnecting Tailscale exit node..."
+	tailscale set --exit-node=
+
+tailscale-disconnect: tailscale-down
+
+.PHONY: tailscale-status
+tailscale-status: ## Check Tailscale status and active exit node.
+	tailscale status
 
 .PHONY: oc-login login
 oc-login: ## Log in to OKD cluster via web browser.

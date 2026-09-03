@@ -1,0 +1,44 @@
+---
+# Configure Tailscale exit node and subnet router on laptop-server
+# Usage: ansible-playbook -i inventory.yml configure-tailscale-laptop.yml
+
+- name: Configure Tailscale exit node and subnet router on laptop-server
+  hosts: laptop_libvirt_hosts
+  become: true
+  vars:
+    tailscale_advertised_routes: "192.168.1.0/24"
+  tasks:
+    - name: Enable IPv4 and IPv6 packet forwarding in sysctl
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-tailscale.conf
+        reload: true
+      loop:
+        - { name: "net.ipv4.ip_forward", value: "1" }
+        - { name: "net.ipv6.conf.all.forwarding", value: "1" }
+
+    - name: Ensure firewalld has tailscale0 in trusted zone
+      ansible.posix.firewalld:
+        zone: trusted
+        interface: tailscale0
+        permanent: true
+        state: enabled
+        immediate: true
+      failed_when: false
+
+    - name: Ensure firewalld masquerade is enabled
+      ansible.posix.firewalld:
+        masquerade: true
+        permanent: true
+        state: enabled
+        immediate: true
+      failed_when: false
+
+    - name: Configure Tailscale to advertise exit node and local subnet routes
+      ansible.builtin.command: >
+        tailscale set
+        --advertise-exit-node
+        --advertise-routes={{ tailscale_advertised_routes }}
+      changed_when: true
