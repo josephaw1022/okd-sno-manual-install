@@ -419,6 +419,26 @@ approve-csrs: ## Approve pending CSRs for nodes.
 	@oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' | xargs -r oc adm certificate approve
 
 
+##@ Remote Access & Authentication
+
+TAILSCALE_EXIT_NODE ?= 100.110.200.108
+OKD_API_URL ?= https://api.$(CLUSTER_NAME).$(BASE_DOMAIN):6443
+
+.PHONY: tailscale-up tailscale
+tailscale-up: ## Connect to Tailscale with exit node and accept routes.
+	@echo "🔗 Connecting to Tailscale (exit-node: $(TAILSCALE_EXIT_NODE))..."
+	tailscale up --exit-node=$(TAILSCALE_EXIT_NODE) --accept-routes
+
+tailscale: tailscale-up
+
+.PHONY: oc-login login
+oc-login: ## Log in to OKD cluster via web browser.
+	@echo "🔐 Logging in to OKD cluster ($(OKD_API_URL))..."
+	oc login --web --server=$(OKD_API_URL)
+
+login: oc-login
+
+
 ##@ Manifest Inspection
 
 .PHONY: extract-manifests
