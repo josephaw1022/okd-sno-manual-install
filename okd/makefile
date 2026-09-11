@@ -449,6 +449,14 @@ tailscale-down: ## Disconnect exit node from Tailscale.
 
 tailscale-disconnect: tailscale-down
 
+.PHONY: tailscale-reset reset-ts reset-ts-laptop
+tailscale-reset: ## Reset Tailscale settings on this laptop back to default values.
+	@echo "🔄 Resetting Tailscale settings on this laptop to defaults..."
+	tailscale up --reset
+
+reset-ts: tailscale-reset
+reset-ts-laptop: tailscale-reset
+
 .PHONY: tailscale-status
 tailscale-status: ## Check Tailscale status and active exit node.
 	tailscale status
