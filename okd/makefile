@@ -436,11 +436,18 @@ configure-tailscale-laptop: ## Configure laptop-server as Tailscale exit node & 
 setup-tailscale-laptop: configure-tailscale-laptop
 
 .PHONY: tailscale-up tailscale
-tailscale-up: ## Connect to Tailscale with exit node and accept routes.
-	@echo "🔗 Connecting to Tailscale (exit-node: $(TAILSCALE_EXIT_NODE))..."
-	tailscale up --exit-node=$(TAILSCALE_EXIT_NODE) --accept-routes
+tailscale-up: ## Connect to Tailscale with exit node, accept routes, and allow local LAN access.
+	@echo "🔗 Connecting to Tailscale (exit-node: $(TAILSCALE_EXIT_NODE), local LAN allowed)..."
+	tailscale up --exit-node=$(TAILSCALE_EXIT_NODE) --accept-routes --exit-node-allow-lan-access
 
 tailscale: tailscale-up
+
+.PHONY: tailscale-allow-lan allow-lan
+tailscale-allow-lan: ## Allow direct access to local network and local DNS while using exit node.
+	@echo "🌐 Enabling direct local LAN access with exit node..."
+	tailscale set --exit-node-allow-lan-access
+
+allow-lan: tailscale-allow-lan
 
 .PHONY: tailscale-down tailscale-disconnect
 tailscale-down: ## Disconnect exit node from Tailscale.
@@ -719,6 +726,17 @@ fix-bootstrap: ## Create bootstrap configmap to unblock openshift-apiserver API 
 	@echo "🔧 Creating bootstrap configmap..."
 	@printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bootstrap\n  namespace: kube-system\ndata:\n  status: complete\n' | oc apply -f -
 	@echo "✅ Bootstrap configmap created - openshift-apiserver should now register Route API"
+
+
+.PHONY: unblock-crio-multus
+unblock-crio-multus: ## Temporarily move leftover 00-multus.conf on master nodes to resolve CRI-O boot watchdog deadlock.
+	@echo "🔧 Moving 00-multus.conf out of CNI directory on master nodes..."
+	@for ip in $(MASTER0_IP) $(MASTER1_IP) $(MASTER2_IP); do \
+		echo "Connecting to $$ip..."; \
+		ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$$ip \
+			"if [ -f /etc/kubernetes/cni/net.d/00-multus.conf ]; then sudo mv /etc/kubernetes/cni/net.d/00-multus.conf /tmp/00-multus.conf && echo \"Moved on $$ip\"; else echo \"Not present on $$ip\"; fi"; \
+	done
+	@echo "✅ Moved 00-multus.conf. CRI-O can now initialize cleanly."
 
 
 ##@ Operators
