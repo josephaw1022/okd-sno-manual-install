@@ -1,0 +1,15 @@
+---
+# Master playbook to deploy full Quay registry stack on laptop-server
+# Usage: ansible-playbook -i inventory.yml create-quay-stack.yml
+
+- name: Deploy Quay PostgreSQL Container
+  ansible.builtin.import_playbook: create-quay-postgres.yml
+
+- name: Deploy Quay Valkey Cache Container
+  ansible.builtin.import_playbook: create-quay-valkey.yml
+
+- name: Deploy Quay Registry Container
+  ansible.builtin.import_playbook: create-quay-registry.yml
+
+- name: Deploy Quay Nginx Ingress Container
+  ansible.builtin.import_playbook: create-quay-nginx.yml

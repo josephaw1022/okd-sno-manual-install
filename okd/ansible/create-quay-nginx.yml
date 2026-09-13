@@ -1,0 +1,209 @@
+---
+# Ansible playbook to create Nginx Ingress container for Quay on laptop-server
+# Usage: ansible-playbook -i inventory.yml create-quay-nginx.yml
+
+- name: Create Nginx Ingress container for Quay
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    nginx_container_name: quay-nginx
+    nginx_ip: 192.168.1.33
+    nginx_config_dir: /opt/quay-nginx
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_network_name: quay-net
+    dns_server: 192.168.1.5
+
+  tasks:
+    - name: Find LAN interface for 192.168.1.x
+      ansible.builtin.shell:
+        cmd: |
+          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+      register: lan_interface
+      changed_when: false
+
+    - name: Set macvlan parent interface
+      ansible.builtin.set_fact:
+        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Ensure Nginx directories exist on laptop-server
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ nginx_config_dir }}"
+        - "{{ nginx_config_dir }}/certs"
+
+    - name: Check if Let's Encrypt certificate exists locally
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+      delegate_to: localhost
+      register: le_cert_stat
+      become: false
+
+    - name: Copy Let's Encrypt TLS certificate to laptop-server
+      ansible.builtin.copy:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+        dest: "{{ nginx_config_dir }}/certs/quay.crt"
+        mode: '0644'
+      when: le_cert_stat.stat.exists
+
+    - name: Copy Let's Encrypt TLS private key to laptop-server
+      ansible.builtin.copy:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
+        dest: "{{ nginx_config_dir }}/certs/quay.key"
+        mode: '0600'
+      no_log: true
+      when: le_cert_stat.stat.exists
+
+    - name: Fallback copy local TLS certificate to laptop-server
+      ansible.builtin.copy:
+        src: ../certs/quay/quay.crt
+        dest: "{{ nginx_config_dir }}/certs/quay.crt"
+        mode: '0644'
+      when: not le_cert_stat.stat.exists
+
+    - name: Fallback copy local TLS private key to laptop-server
+      ansible.builtin.copy:
+        src: ../certs/quay/quay.key
+        dest: "{{ nginx_config_dir }}/certs/quay.key"
+        mode: '0600'
+      no_log: true
+      when: not le_cert_stat.stat.exists
+
+    - name: Deploy Nginx reverse proxy configuration
+      ansible.builtin.copy:
+        dest: "{{ nginx_config_dir }}/nginx.conf"
+        mode: '0644'
+        content: |
+          events {
+              worker_connections 1024;
+          }
+
+          http {
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+              sendfile on;
+              keepalive_timeout 65;
+
+              resolver 192.168.1.5 valid=30s;
+
+              # Support unlimited upload size for docker image pushes
+              client_max_body_size 0;
+              proxy_buffering off;
+              proxy_request_buffering off;
+
+              upstream quay_backend {
+                  server quay-registry.kubesoar.com:8443 max_fails=3 fail_timeout=10s;
+              }
+
+              # HTTP redirect to HTTPS
+              server {
+                  listen 80;
+                  server_name quay.kubesoar.com;
+
+                  location / {
+                      return 301 https://$host$request_uri;
+                  }
+              }
+
+              # HTTPS Ingress
+              server {
+                  listen 443 ssl;
+                  server_name quay.kubesoar.com;
+
+                  ssl_certificate /etc/nginx/ssl/quay.crt;
+                  ssl_certificate_key /etc/nginx/ssl/quay.key;
+                  ssl_protocols TLSv1.2 TLSv1.3;
+                  ssl_ciphers HIGH:!aNULL:!MD5;
+
+                  location / {
+                      proxy_pass https://quay_backend;
+                      proxy_ssl_verify off;
+                      proxy_set_header Host $http_host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto https;
+                      proxy_set_header X-Forwarded-Port 443;
+                      proxy_read_timeout 900s;
+                      proxy_connect_timeout 300s;
+                      proxy_send_timeout 900s;
+                  }
+              }
+          }
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ nginx_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start Nginx Ingress container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ nginx_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ nginx_ip }}
+          --dns {{ dns_server }}
+          --restart always
+          -v {{ nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+          -v {{ nginx_config_dir }}/certs:/etc/nginx/ssl:ro,Z
+          --health-cmd "nginx -t || exit 1"
+          --health-interval 30s
+          --health-timeout 5s
+          --health-retries 3
+          --health-start-period 5s
+          docker.io/nginx:alpine
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ nginx_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ nginx_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 15
+      delay: 2
+      changed_when: false
+
+    - name: Verify Nginx configuration syntax inside container
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ nginx_container_name }} nginx -t
+      changed_when: false
+
+    - name: Display Nginx status
+      ansible.builtin.debug:
+        msg:
+          - "Quay Nginx Ingress container is ready!"
+          - "Container: {{ nginx_container_name }}"
+          - "IP Address: {{ nginx_ip }}"
+          - "Domain: quay.kubesoar.com"
+          - "Ports: 80 (HTTP redirect), 443 (HTTPS with TLS cert)"
+          - "Upstream: quay-registry.kubesoar.com:8080"

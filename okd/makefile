@@ -1,7 +1,7 @@
 # Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
 # OKD values
-OKD_VERSION ?= 4.22.0-okd-scos.0
+OKD_VERSION ?= 4.22.0-okd-scos.10
 
 # Openshift values
 # OKD_VERSION ?= 4.21.10
@@ -162,6 +162,15 @@ update-dns: ## Update Pi-hole DNS config for OKD cluster.
 	@echo "✅ DNS updated"
 
 
+.PHONY: add-quay-dns
+add-quay-dns: ## Add Quay DNS records to Pi-hole and verify resolution.
+	@echo "🌐 Adding Quay DNS records to Pi-hole..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml add-quay-dns-to-pihole.yml && \
+	popd > /dev/null
+	@echo "✅ Quay DNS updated and verified"
+
+
 ##@ Cockpit Management
 
 .PHONY: install-cockpit-laptop
@@ -248,6 +257,7 @@ config: ## Generate install-config.yaml and agent-config.yaml.
 .PHONY: agent-iso
 agent-iso: ## Generate the agent-based installer ISO (single ISO for all nodes).
 	@echo "📦 Generating agent-based installer ISO..."
+	rm -rf cluster
 	mkdir -p cluster
 	cp install-config.yaml cluster/
 	cp agent-config.yaml cluster/
@@ -258,6 +268,7 @@ agent-iso: ## Generate the agent-based installer ISO (single ISO for all nodes).
 .PHONY: cluster-manifests
 cluster-manifests: ## Generate cluster manifests for modification before ISO creation.
 	@echo "📋 Generating cluster manifests..."
+	rm -rf cluster
 	mkdir -p cluster
 	cp install-config.yaml cluster/
 	cp agent-config.yaml cluster/
@@ -435,6 +446,16 @@ configure-tailscale-laptop: ## Configure laptop-server as Tailscale exit node & 
 
 setup-tailscale-laptop: configure-tailscale-laptop
 
+.PHONY: start-tailscale-supermicro start-tailscale-desktop
+start-tailscale-supermicro: ## Start and connect Tailscale on the supermicro server via Ansible.
+	@echo "🔗 Starting Tailscale on supermicro server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml start-tailscale-supermicro.yml && \
+	popd > /dev/null
+	@echo "✅ Tailscale started on supermicro server"
+
+start-tailscale-desktop: start-tailscale-supermicro
+
 .PHONY: tailscale-up tailscale
 tailscale-up: ## Connect to Tailscale with exit node, accept routes, and allow local LAN access.
 	@echo "🔗 Connecting to Tailscale (exit-node: $(TAILSCALE_EXIT_NODE), local LAN allowed)..."
@@ -527,6 +548,15 @@ create-vms: ## Create the VMs on the libvirt server via Ansible.
 	@echo "   3. After install: make use-kubeconfig (configure kubectl access)"
 	@echo ""
 	@echo "💡 Tip: If watch-bootstrap fails with SSH errors, run: make clean-known-hosts"
+
+
+.PHONY: stop-vms
+stop-vms: ## Stop all OKD master VMs via Ansible.
+	@echo "⏹️ Stopping OKD VMs..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml stop-vms.yml && \
+	popd > /dev/null
+	@echo "✅ OKD VMs stopped"
 
 
 .PHONY: destroy-vms
@@ -636,22 +666,134 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 	@echo "✅ Load balancer destroyed"
 
 
-.PHONY: create-registry-cache
-create-registry-cache: ## Create pull-through cache registry for Quay.io.
-	@echo "📦 Creating pull-through cache registry for Quay.io..."
-	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml create-registry-cache.yml && \
-	popd > /dev/null
-	@echo "✅ Registry cache created"
 
 
-.PHONY: destroy-registry-cache
-destroy-registry-cache: ## Destroy pull-through cache registry.
-	@echo "💥 Destroying registry cache..."
+##@ Quay Registry Stack (laptop-server)
+
+.PHONY: create-quay-ingress-cert create-quay-cert
+create-quay-ingress-cert: ## Generate Let's Encrypt cert for quay.kubesoar.com using certbot container (DNS-01 challenge).
+	@echo "🔐 Generating Let's Encrypt certificate for quay.$(BASE_DOMAIN) using $(CONTAINER_ENGINE)..."
+	sudo $(CONTAINER_ENGINE) run --rm -it \
+	  -v /etc/letsencrypt:/etc/letsencrypt:z \
+	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  $(CERTBOT_IMAGE) certonly \
+	  --manual \
+	  --preferred-challenges dns \
+	  -d "quay.$(BASE_DOMAIN)"
+	@echo "✅ Certificate generated for quay.$(BASE_DOMAIN)"
+
+create-quay-cert: create-quay-ingress-cert
+
+
+.PHONY: transfer-quay-cert
+transfer-quay-cert: ## Sync Let's Encrypt cert for quay.kubesoar.com to local repo, transfer to laptop-server, and restart containers.
+	@echo "📤 Syncing Let's Encrypt certificate to local repo..."
+	sudo cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/fullchain.pem certs/quay/quay.crt
+	sudo cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/privkey.pem certs/quay/quay.key
+	sudo chown $$(id -u):$$(id -g) certs/quay/quay.crt certs/quay/quay.key
+	@echo "📤 Transferring certificate to laptop-server and restarting Quay containers..."
 	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml destroy-registry-cache.yml && \
+	ansible-playbook -i inventory.yml transfer-quay-cert.yml && \
 	popd > /dev/null
-	@echo "✅ Registry cache destroyed"
+	@echo "✅ Certificate transferred and containers restarted"
+
+
+.PHONY: create-quay-postgres
+create-quay-postgres: ## Create PostgreSQL container for Quay on laptop-server.
+	@echo "🐘 Creating PostgreSQL container for Quay on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-quay-postgres.yml && \
+	popd > /dev/null
+	@echo "✅ Quay PostgreSQL container created"
+
+
+.PHONY: create-quay-valkey
+create-quay-valkey: ## Create Valkey cache container for Quay on laptop-server.
+	@echo "🔴 Creating Valkey container for Quay on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-quay-valkey.yml && \
+	popd > /dev/null
+	@echo "✅ Quay Valkey container created"
+
+
+.PHONY: create-quay-registry
+create-quay-registry: ## Create Quay registry container on laptop-server.
+	@echo "📦 Creating Quay registry container on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-quay-registry.yml && \
+	popd > /dev/null
+	@echo "✅ Quay registry container created"
+
+
+.PHONY: create-quay-nginx
+create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress container on laptop-server.
+	@echo "🌐 Creating Quay Nginx ingress container on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-quay-nginx.yml && \
+	popd > /dev/null
+	@echo "✅ Quay Nginx ingress container created"
+
+
+.PHONY: create-quay-stack
+create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Registry, Nginx) on laptop-server.
+	@echo "🚀 Deploying full Quay stack on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-quay-stack.yml && \
+	popd > /dev/null
+	@echo "✅ Full Quay stack deployed on laptop-server"
+
+
+.PHONY: destroy-quay-stack
+destroy-quay-stack: ## Destroy Quay stack containers and network on laptop-server.
+	@echo "💥 Destroying Quay stack on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-quay-stack.yml && \
+	popd > /dev/null
+	@echo "✅ Quay stack destroyed"
+
+
+.PHONY: update-quay-config
+update-quay-config: ## Update Quay config.yaml (e.g. superusers) on laptop-server and reload.
+	@echo "⚙️ Updating Quay configuration on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml update-quay-config.yml && \
+	popd > /dev/null
+	@echo "✅ Quay configuration updated"
+
+
+.PHONY: quay-logs
+quay-logs: ## View Quay registry container logs on laptop-server.
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml check-quay-logs.yml && \
+	popd > /dev/null
+
+
+.PHONY: verify-quay
+verify-quay: ## Verify Quay stack health, containers, endpoints, and connectivity.
+	@echo "🔍 Verifying Quay stack on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml verify-quay-stack.yml && \
+	popd > /dev/null
+	@echo "✅ Verification complete"
+
+
+.PHONY: setup-quay-entraid
+setup-quay-entraid: ## Configure Microsoft Entra ID (Azure AD) OAuth/OIDC for Quay registry on laptop-server.
+	@echo "🔐 Setting up Entra ID OAuth for Quay registry..."
+	@pushd ansible > /dev/null && \
+	TENANT=$${AZURE_TENANT_ID:-$$(az account show --query tenantId -o tsv 2>/dev/null)}; \
+	SUB=$${AZURE_SUBSCRIPTION_ID:-$$(az account show --query id -o tsv 2>/dev/null)}; \
+	if [ -z "$$TENANT" ] || [ -z "$$SUB" ]; then \
+		echo "❌ Azure credentials not found. Run 'az login' first."; \
+		exit 1; \
+	fi; \
+	ansible-playbook -i inventory.yml setup-quay-entraid.yml \
+		-e "azure_tenant_id=$$TENANT" \
+		-e "azure_subscription_id=$$SUB" && \
+	popd > /dev/null
+	@echo "✅ Entra ID OAuth configured for Quay registry"
+
+
 
 
 ##@ Cluster Configuration

@@ -1,0 +1,118 @@
+---
+# Ansible playbook to create Valkey cache container for Quay on laptop-server
+# Usage: ansible-playbook -i inventory.yml create-quay-valkey.yml
+
+- name: Create Valkey cache container for Quay
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    valkey_container_name: quay-valkey
+    valkey_ip: 192.168.1.31
+    valkey_port: 6379
+    valkey_volume_name: quay-valkey-data
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_network_name: quay-net
+    dns_server: 192.168.1.5
+
+  tasks:
+    - name: Find LAN interface for 192.168.1.x
+      ansible.builtin.shell:
+        cmd: |
+          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+      register: lan_interface
+      changed_when: false
+
+    - name: Set macvlan parent interface
+      ansible.builtin.set_fact:
+        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if Valkey named volume exists
+      ansible.builtin.command:
+        cmd: sudo podman volume exists {{ valkey_volume_name }}
+      register: volume_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create Valkey named volume
+      ansible.builtin.command:
+        cmd: sudo podman volume create {{ valkey_volume_name }}
+      when: volume_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ valkey_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start Valkey container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ valkey_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ valkey_ip }}
+          --dns {{ dns_server }}
+          --restart always
+          -v {{ valkey_volume_name }}:/data:Z
+          --health-cmd "valkey-cli ping || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+          --health-start-period 5s
+          docker.io/valkey/valkey:8-alpine
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ valkey_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ valkey_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 15
+      delay: 2
+      changed_when: false
+
+    - name: Wait for Valkey to respond to ping
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ valkey_container_name }} valkey-cli ping
+      register: valkey_ping
+      until: valkey_ping.stdout == 'PONG'
+      retries: 20
+      delay: 2
+      changed_when: false
+
+    - name: Display Valkey status
+      ansible.builtin.debug:
+        msg:
+          - "Quay Valkey container is ready!"
+          - "Container: {{ valkey_container_name }}"
+          - "IP Address: {{ valkey_ip }}"
+          - "Domain: quay-valkey.kubesoar.com"
+          - "Port: {{ valkey_port }}"
+          - "Volume: {{ valkey_volume_name }}"

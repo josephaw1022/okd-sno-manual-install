@@ -23,5 +23,5 @@
     - name: Delete node data volumes from pool
       ansible.builtin.command:
         cmd: virsh vol-delete --pool {{ pool_name }} {{ item }}
-      loop: "{{ node_data_volumes }}"
-      when: item in pool_volumes.stdout_lines
+      loop: "{{ pool_volumes.stdout_lines }}"
+      when: item | trim != ""

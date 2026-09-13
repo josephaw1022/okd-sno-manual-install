@@ -1,0 +1,14 @@
+---
+- name: Check Quay registry logs on laptop-server
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  tasks:
+    - name: Get Quay logs
+      ansible.builtin.command:
+        cmd: sudo podman logs --tail 50 quay-registry
+      register: quay_logs
+      changed_when: false
+
+    - name: Display Quay logs
+      ansible.builtin.debug:
+        var: quay_logs.stdout_lines

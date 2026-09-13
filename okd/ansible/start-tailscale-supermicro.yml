@@ -1,0 +1,27 @@
+---
+# Start Tailscale on supermicro server (okd-server / desktop-server)
+# Usage: ansible-playbook -i inventory.yml start-tailscale-supermicro.yml
+
+- name: Verify and repair tailscale package
+  hosts: libvirt_hosts
+  become: true
+  tasks:
+    - name: Verify tailscale package integrity
+      ansible.builtin.command: rpm -V tailscale
+      register: rpm_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Print rpm verification
+      ansible.builtin.debug:
+        var: rpm_verify.stdout_lines
+
+    - name: Check tailscale package info
+      ansible.builtin.command: rpm -qi tailscale
+      register: rpm_qi
+      changed_when: false
+      failed_when: false
+
+    - name: Print rpm info
+      ansible.builtin.debug:
+        var: rpm_qi.stdout_lines

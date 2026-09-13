@@ -1,0 +1,45 @@
+---
+# Ansible playbook to destroy Quay stack containers and network on laptop-server
+# Usage: ansible-playbook -i inventory.yml destroy-quay-stack.yml
+
+- name: Destroy Quay stack on laptop-server
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    delete_volumes: "{{ lookup('env', 'DELETE_VOLUMES') | default('false', true) | bool }}"
+    containers:
+      - quay-nginx
+      - quay-registry
+      - quay-valkey
+      - quay-postgres
+    volumes:
+      - quay-storage-data
+      - quay-valkey-data
+      - quay-postgres-data
+    macvlan_network_name: quay-net
+
+  tasks:
+    - name: Stop and remove Quay containers
+      ansible.builtin.command:
+        cmd: "sudo podman rm -f {{ item }}"
+      loop: "{{ containers }}"
+      failed_when: false
+      changed_when: true
+
+    - name: Remove Quay named volumes if requested
+      ansible.builtin.command:
+        cmd: "sudo podman volume rm -f {{ item }}"
+      loop: "{{ volumes }}"
+      when: delete_volumes
+      failed_when: false
+      changed_when: true
+
+    - name: Remove macvlan network
+      ansible.builtin.command:
+        cmd: "sudo podman network rm {{ macvlan_network_name }}"
+      failed_when: false
+      changed_when: true
+
+    - name: Display teardown confirmation
+      ansible.builtin.debug:
+        msg: "Quay stack containers and network destroyed."

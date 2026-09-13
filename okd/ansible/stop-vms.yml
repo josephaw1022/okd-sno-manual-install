@@ -1,0 +1,31 @@
+---
+# Ansible playbook to stop OKD VMs on libvirt host
+# Usage: ansible-playbook -i inventory.yml stop-vms.yml
+
+- name: Stop OKD VMs on libvirt host
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    cluster_name: okd
+    vms_to_stop:
+      - "{{ cluster_name }}-master-0"
+      - "{{ cluster_name }}-master-1"
+      - "{{ cluster_name }}-master-2"
+
+  tasks:
+    - name: Get list of running VMs
+      ansible.builtin.command:
+        cmd: virsh list --state-running --name
+      register: running_vms
+      changed_when: false
+
+    - name: Stop VMs
+      ansible.builtin.command:
+        cmd: virsh destroy {{ item }}
+      loop: "{{ vms_to_stop }}"
+      when: item in running_vms.stdout_lines
+      failed_when: false
+
+    - name: Display stop results
+      ansible.builtin.debug:
+        msg: "All OKD VMs have been stopped."

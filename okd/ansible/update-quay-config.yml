@@ -1,0 +1,113 @@
+---
+# Ansible playbook to update Quay config.yaml on laptop-server
+# Usage: ansible-playbook -i inventory.yml update-quay-config.yml
+
+- name: Update Quay Configuration
+  hosts: laptop_libvirt_hosts
+  become: true
+  vars:
+    quay_config_dir: /opt/quay/config
+    pg_user: "{{ quay_postgres_user | default('quay') }}"
+    pg_password: "{{ quay_postgres_password | default('quaypass') }}"
+    pg_database: "{{ quay_postgres_db | default('quay') }}"
+    default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
+    default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
+
+  tasks:
+    - name: Check if existing config.yaml exists
+      ansible.builtin.stat:
+        path: "{{ quay_config_dir }}/config.yaml"
+      register: stat_config
+
+    - name: Read existing Quay config.yaml
+      ansible.builtin.slurp:
+        src: "{{ quay_config_dir }}/config.yaml"
+      register: current_config_raw
+      when: stat_config.stat.exists
+
+    - name: Parse existing config
+      ansible.builtin.set_fact:
+        current_oidc_config: "{{ (current_config_raw.content | b64decode | from_yaml).OIDC_LOGIN_CONFIG | default(omit) }}"
+      when: stat_config.stat.exists and (current_config_raw.content | b64decode | from_yaml).OIDC_LOGIN_CONFIG is defined
+
+    - name: Update Quay config.yaml
+      ansible.builtin.copy:
+        dest: "{{ quay_config_dir }}/config.yaml"
+        mode: '0644'
+        content: |
+          SERVER_HOSTNAME: quay.kubesoar.com
+          REGISTRY_TITLE: "Homelab Quay Registry"
+          REGISTRY_TITLE_SHORT: "Quay"
+          SETUP_COMPLETE: true
+          AUTHENTICATION_TYPE: Database
+          PREFERRED_URL_SCHEME: https
+
+          FEATURE_BUILD_SUPPORT: false
+          FEATURE_USER_INITIALIZE: true
+          FEATURE_USER_CREATION: true
+          FEATURE_DIRECT_LOGIN: true
+          FEATURE_ANONYMOUS_ACCESS: true
+          FEATURE_MAILING: false
+
+          # Proxy Cache & Garbage Collection
+          FEATURE_PROXY_CACHE: true
+          FEATURE_GARBAGE_COLLECTION: true
+          FEATURE_CHANGE_TAG_EXPIRATION: true
+          DEFAULT_TAG_EXPIRATION: "14d"
+          TAG_EXPIRATION_OPTIONS:
+            - "0s"
+            - "1d"
+            - "7d"
+            - "14d"
+            - "30d"
+            - "60d"
+            - "90d"
+
+          SUPER_USERS:
+            - jwhiteaker
+            - admin
+          {% if current_oidc_config is defined %}
+
+          # Microsoft Entra ID (Azure AD) OpenID Connect Configuration
+          OIDC_LOGIN_CONFIG:
+            CLIENT_ID: "{{ current_oidc_config.CLIENT_ID }}"
+            CLIENT_SECRET: "{{ current_oidc_config.CLIENT_SECRET }}"
+            OIDC_SERVER: "{{ current_oidc_config.OIDC_SERVER }}"
+            SERVICE_NAME: "{{ current_oidc_config.SERVICE_NAME | default('Microsoft Entra ID') }}"
+            SERVICE_ICON: "{{ current_oidc_config.SERVICE_ICON | default('microsoft') }}"
+            LOGIN_SCOPES:
+              - openid
+              - profile
+              - email
+          {% endif %}
+
+          # Database connection using Pi-hole domain name
+          DB_URI: "postgresql://{{ pg_user }}:{{ pg_password }}@quay-postgres.kubesoar.com:5432/{{ pg_database }}"
+          DB_CONNECTION_ARGS:
+            autorollback: true
+            threadlocals: true
+
+          # Valkey caching using Pi-hole domain name
+          BUILDLOGS_REDIS:
+            host: "quay-valkey.kubesoar.com"
+            port: 6379
+          USER_EVENTS_REDIS:
+            host: "quay-valkey.kubesoar.com"
+            port: 6379
+
+          # Storage
+          DISTRIBUTED_STORAGE_PREFERENCE:
+            - default
+          DISTRIBUTED_STORAGE_CONFIG:
+            default:
+              - LocalStorage
+              - storage_path: /datastorage/registry
+
+          SECRET_KEY: "{{ lookup('env', 'QUAY_SECRET_KEY') | default(default_secret_key, true) }}"
+          DATABASE_SECRET_KEY: "{{ lookup('env', 'QUAY_DATABASE_SECRET_KEY') | default(default_db_secret_key, true) }}"
+      notify: Restart Quay Registry
+
+  handlers:
+    - name: Restart Quay Registry
+      ansible.builtin.command:
+        cmd: sudo podman restart quay-registry

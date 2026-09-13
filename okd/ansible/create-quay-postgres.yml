@@ -1,0 +1,149 @@
+---
+# Ansible playbook to create PostgreSQL container for Quay on laptop-server
+# Usage: ansible-playbook -i inventory.yml create-quay-postgres.yml
+
+- name: Create PostgreSQL container for Quay
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    pg_container_name: quay-postgres
+    pg_ip: 192.168.1.30
+    pg_port: 5432
+    pg_volume_name: quay-postgres-data
+    pg_database: "{{ quay_postgres_db | default('quay') }}"
+    pg_user: "{{ quay_postgres_user | default('quay') }}"
+    pg_password: "{{ quay_postgres_password | default('quaypass') }}"
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_network_name: quay-net
+    dns_server: 192.168.1.5
+    pg_init_dir: /opt/quay-postgres/initdb.d
+
+  tasks:
+    - name: Find LAN interface for 192.168.1.x
+      ansible.builtin.shell:
+        cmd: |
+          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+      register: lan_interface
+      changed_when: false
+
+    - name: Set macvlan parent interface
+      ansible.builtin.set_fact:
+        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Ensure PostgreSQL init directory exists
+      ansible.builtin.file:
+        path: "{{ pg_init_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy pg_trgm extension script for Quay
+      ansible.builtin.copy:
+        dest: "{{ pg_init_dir }}/init-quay-db.sql"
+        mode: '0644'
+        content: |
+          -- Quay requires pg_trgm extension
+          CREATE EXTENSION IF NOT EXISTS pg_trgm;
+          CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+    - name: Check if PostgreSQL named volume exists
+      ansible.builtin.command:
+        cmd: sudo podman volume exists {{ pg_volume_name }}
+      register: volume_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create PostgreSQL named volume
+      ansible.builtin.command:
+        cmd: sudo podman volume create {{ pg_volume_name }}
+      when: volume_exists.rc != 0
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ pg_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start PostgreSQL container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ pg_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ pg_ip }}
+          --dns {{ dns_server }}
+          --restart always
+          -e POSTGRES_DB={{ pg_database }}
+          -e POSTGRES_USER={{ pg_user }}
+          -e POSTGRES_PASSWORD={{ pg_password }}
+          -v {{ pg_volume_name }}:/var/lib/postgresql/data:Z
+          -v {{ pg_init_dir }}:/docker-entrypoint-initdb.d:ro,Z
+          --health-cmd "pg_isready -U {{ pg_user }} -d {{ pg_database }} || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+          docker.io/postgres:16-alpine
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ pg_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ pg_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 15
+      delay: 2
+      changed_when: false
+
+    - name: Wait for PostgreSQL to be ready
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} pg_isready -U {{ pg_user }} -d {{ pg_database }}
+      register: pg_ready
+      until: pg_ready.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Ensure pg_trgm extension exists in database
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} psql -U {{ pg_user }} -d {{ pg_database }} -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+      register: ext_result
+      changed_when: false
+
+    - name: Display PostgreSQL status
+      ansible.builtin.debug:
+        msg:
+          - "Quay PostgreSQL container is ready!"
+          - "Container: {{ pg_container_name }}"
+          - "IP Address: {{ pg_ip }}"
+          - "Domain: quay-postgres.kubesoar.com"
+          - "Port: {{ pg_port }}"
+          - "Database: {{ pg_database }}"
+          - "User: {{ pg_user }}"
+          - "Volume: {{ pg_volume_name }}"

@@ -1,0 +1,267 @@
+---
+# Ansible playbook to create Quay registry container on laptop-server
+# Usage: ansible-playbook -i inventory.yml create-quay-registry.yml
+
+- name: Create Quay registry container
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    quay_container_name: quay-registry
+    quay_ip: 192.168.1.32
+    quay_port: 8443
+    quay_volume_name: quay-storage-data
+    quay_config_dir: /opt/quay/config
+    pg_user: "{{ quay_postgres_user | default('quay') }}"
+    pg_password: "{{ quay_postgres_password | default('quaypass') }}"
+    pg_database: "{{ quay_postgres_db | default('quay') }}"
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_network_name: quay-net
+    dns_server: 192.168.1.5
+    default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
+    default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
+
+  tasks:
+    - name: Find LAN interface for 192.168.1.x
+      ansible.builtin.shell:
+        cmd: |
+          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+      register: lan_interface
+      changed_when: false
+
+    - name: Set macvlan parent interface
+      ansible.builtin.set_fact:
+        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Check if Quay storage named volume exists
+      ansible.builtin.command:
+        cmd: sudo podman volume exists {{ quay_volume_name }}
+      register: volume_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create Quay storage named volume
+      ansible.builtin.command:
+        cmd: sudo podman volume create {{ quay_volume_name }}
+      when: volume_exists.rc != 0
+
+    - name: Get Quay storage volume mountpoint
+      ansible.builtin.command:
+        cmd: sudo podman volume inspect {{ quay_volume_name }} --format '{{ '{{' }}.Mountpoint{{ '}}' }}'
+      register: vol_mountpoint
+      changed_when: false
+
+    - name: Ensure storage directory exists with correct permissions for Quay user (UID 1001)
+      ansible.builtin.file:
+        path: "{{ vol_mountpoint.stdout }}/registry"
+        state: directory
+        owner: "1001"
+        group: "1001"
+        mode: "0775"
+
+    - name: Ensure Quay configuration directory exists
+      ansible.builtin.file:
+        path: "{{ quay_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check if Quay config.yaml already exists
+      ansible.builtin.stat:
+        path: "{{ quay_config_dir }}/config.yaml"
+      register: existing_config
+
+    - name: Deploy Quay config.yaml
+      ansible.builtin.copy:
+        dest: "{{ quay_config_dir }}/config.yaml"
+        mode: '0644'
+        content: |
+          SERVER_HOSTNAME: quay.kubesoar.com
+          REGISTRY_TITLE: "Homelab Quay Registry"
+          REGISTRY_TITLE_SHORT: "Quay"
+          SETUP_COMPLETE: true
+          AUTHENTICATION_TYPE: Database
+          PREFERRED_URL_SCHEME: https
+
+          FEATURE_BUILD_SUPPORT: false
+          FEATURE_USER_INITIALIZE: true
+          FEATURE_USER_CREATION: true
+          FEATURE_DIRECT_LOGIN: true
+          FEATURE_ANONYMOUS_ACCESS: true
+          FEATURE_MAILING: false
+
+          # Proxy Cache & Garbage Collection
+          FEATURE_PROXY_CACHE: true
+          FEATURE_GARBAGE_COLLECTION: true
+          FEATURE_CHANGE_TAG_EXPIRATION: true
+          DEFAULT_TAG_EXPIRATION: "14d"
+          TAG_EXPIRATION_OPTIONS:
+            - "0s"
+            - "1d"
+            - "7d"
+            - "14d"
+            - "30d"
+            - "60d"
+            - "90d"
+
+          SUPER_USERS:
+            - jwhiteaker
+            - admin
+
+          # Database connection using Pi-hole domain name
+          DB_URI: "postgresql://{{ pg_user }}:{{ pg_password }}@quay-postgres.kubesoar.com:5432/{{ pg_database }}"
+          DB_CONNECTION_ARGS:
+            autorollback: true
+            threadlocals: true
+
+          # Valkey caching using Pi-hole domain name
+          BUILDLOGS_REDIS:
+            host: "quay-valkey.kubesoar.com"
+            port: 6379
+          USER_EVENTS_REDIS:
+            host: "quay-valkey.kubesoar.com"
+            port: 6379
+
+          # Storage
+          DISTRIBUTED_STORAGE_PREFERENCE:
+            - default
+          DISTRIBUTED_STORAGE_CONFIG:
+            default:
+              - LocalStorage
+              - storage_path: /datastorage/registry
+
+          SECRET_KEY: "{{ lookup('env', 'QUAY_SECRET_KEY') | default(default_secret_key, true) }}"
+          DATABASE_SECRET_KEY: "{{ lookup('env', 'QUAY_DATABASE_SECRET_KEY') | default(default_db_secret_key, true) }}"
+
+    - name: Check if Let's Encrypt certificate exists locally
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+      delegate_to: localhost
+      register: le_cert_stat
+      become: false
+
+    - name: Copy Let's Encrypt TLS certificate to Quay config directory
+      ansible.builtin.copy:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+        dest: "{{ quay_config_dir }}/ssl.cert"
+        mode: '0644'
+      when: le_cert_stat.stat.exists
+
+    - name: Copy Let's Encrypt TLS private key to Quay config directory
+      ansible.builtin.copy:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
+        dest: "{{ quay_config_dir }}/ssl.key"
+        mode: '0644'
+      no_log: true
+      when: le_cert_stat.stat.exists
+
+    - name: Fallback copy local TLS certificate to Quay config directory
+      ansible.builtin.copy:
+        src: ../certs/quay/quay.crt
+        dest: "{{ quay_config_dir }}/ssl.cert"
+        mode: '0644'
+      when: not le_cert_stat.stat.exists
+
+    - name: Fallback copy local TLS private key to Quay config directory
+      ansible.builtin.copy:
+        src: ../certs/quay/quay.key
+        dest: "{{ quay_config_dir }}/ssl.key"
+        mode: '0644'
+      no_log: true
+      when: not le_cert_stat.stat.exists
+
+    - name: Remove any existing Quay container to ensure clean config apply
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ quay_container_name }}
+      failed_when: false
+      changed_when: false
+
+    - name: Check if container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ quay_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start Quay registry container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ quay_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ quay_ip }}
+          --dns {{ dns_server }}
+          --restart always
+          -v {{ quay_config_dir }}:/conf/stack:ro,Z
+          -v {{ quay_volume_name }}:/datastorage:Z
+          --health-cmd "curl -k -f https://127.0.0.1:8443/health/instance || curl -f http://127.0.0.1:8080/health/instance || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --health-start-period 60s
+          quay.io/projectquay/quay:latest
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ quay_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ quay_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 20
+      delay: 2
+      changed_when: false
+
+    - name: Wait for Quay to complete migrations and report healthy
+      ansible.builtin.uri:
+        url: "https://{{ quay_ip }}:8443/health/instance"
+        method: GET
+        status_code: 200
+        validate_certs: false
+      register: quay_health
+      until: quay_health.status == 200
+      retries: 40
+      delay: 5
+      changed_when: false
+
+    - name: Display Quay status
+      ansible.builtin.debug:
+        msg:
+          - "Quay Registry container is ready and healthy!"
+          - "Container: {{ quay_container_name }}"
+          - "Internal IP: {{ quay_ip }}:{{ quay_port }}"
+          - "Domain: quay-registry.kubesoar.com:{{ quay_port }}"
+          - "Database: quay-postgres.kubesoar.com:5432"
+          - "Cache: quay-valkey.kubesoar.com:6379"
+          - "Storage Volume: {{ quay_volume_name }}"
+          - "Proxy Cache: Enabled (FEATURE_PROXY_CACHE=true)"
+          - ""
+          - "Proxy Cache Setup in Quay UI (https://quay.kubesoar.com):"
+          - "  1. Create or open an Organization (e.g. 'quay-cache' or 'quay-io')"
+          - "  2. Go to Organization Settings -> 'Proxy Cache'"
+          - "  3. Set Remote Registry to upstream (e.g. 'quay.io' or 'quay.io/<namespace>')"
+          - "  4. (Optional) Set credentials & tag expiration, then click Save"
+          - "  5. Pull through cache: podman pull quay.kubesoar.com/<org>/<image>:<tag>"

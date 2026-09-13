@@ -1,0 +1,115 @@
+---
+# Ansible playbook to verify Quay stack health and connectivity
+# Usage: ansible-playbook -i inventory.yml verify-quay-stack.yml
+
+- name: Verify Quay stack health and connectivity
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    containers:
+      - name: quay-postgres
+        ip: 192.168.1.30
+        domain: quay-postgres.kubesoar.com
+      - name: quay-valkey
+        ip: 192.168.1.31
+        domain: quay-valkey.kubesoar.com
+      - name: quay-registry
+        ip: 192.168.1.32
+        domain: quay-registry.kubesoar.com
+      - name: quay-nginx
+        ip: 192.168.1.33
+        domain: quay.kubesoar.com
+
+  tasks:
+    - name: Inspect container running states
+      ansible.builtin.command:
+        cmd: "sudo podman inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ item.name }}"
+      loop: "{{ containers }}"
+      register: container_statuses
+      changed_when: false
+
+    - name: Inspect container health check statuses
+      ansible.builtin.command:
+        cmd: "sudo podman inspect --format '{{ '{{' }}if .State.Health{{ '}}' }}{{ '{{' }}.State.Health.Status{{ '}}' }}{{ '{{' }}else{{ '}}' }}none{{ '{{' }}end{{ '}}' }}' {{ item.name }}"
+      loop: "{{ containers }}"
+      register: health_statuses
+      changed_when: false
+
+    - name: Test PostgreSQL database connectivity
+      ansible.builtin.command:
+        cmd: "sudo podman exec quay-postgres pg_isready -U quay -d quay"
+      register: pg_test
+      changed_when: false
+
+    - name: Test Valkey cache connectivity
+      ansible.builtin.command:
+        cmd: "sudo podman exec quay-valkey valkey-cli ping"
+      register: valkey_test
+      changed_when: false
+      failed_when: valkey_test.stdout != 'PONG'
+
+    - name: Test internal Quay registry health endpoint
+      ansible.builtin.command:
+        cmd: "sudo podman exec quay-registry curl -k -s -o /dev/null -w '%{http_code}' https://127.0.0.1:8443/health/instance"
+      register: quay_internal_http
+      changed_when: false
+      failed_when: quay_internal_http.stdout != '200'
+
+    - name: Test Nginx HTTP to HTTPS redirect
+      ansible.builtin.command:
+        cmd: "curl -s -o /dev/null -w '%{http_code}' http://quay.kubesoar.com/"
+      delegate_to: localhost
+      register: nginx_http_redirect
+      changed_when: false
+      failed_when: nginx_http_redirect.stdout != '301'
+
+    - name: Test Nginx HTTPS endpoint
+      ansible.builtin.command:
+        cmd: "curl -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/health/instance"
+      delegate_to: localhost
+      register: nginx_https_health
+      changed_when: false
+      failed_when: nginx_https_health.stdout != '200'
+
+    - name: Test Registry V2 API endpoint via HTTPS
+      ansible.builtin.command:
+        cmd: "curl -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/v2/"
+      delegate_to: localhost
+      register: registry_v2_code
+      changed_when: false
+      failed_when: registry_v2_code.stdout not in ['200', '401']
+
+    - name: Query Quay API discovery for Proxy Cache endpoint
+      ansible.builtin.command:
+        cmd: "curl -k -s https://quay.kubesoar.com/api/v1/discovery"
+      delegate_to: localhost
+      register: quay_discovery_raw
+      changed_when: false
+
+    - name: Parse Proxy Cache feature availability
+      ansible.builtin.set_fact:
+        proxy_cache_available: "{{ '/api/v1/organization/{orgname}/proxycache' in (quay_discovery_raw.stdout | from_json).paths }}"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================================"
+          - "              QUAY STACK VERIFICATION REPORT            "
+          - "========================================================"
+          - "Container Statuses:"
+          - "  quay-postgres : {{ container_statuses.results[0].stdout }} (Health: {{ health_statuses.results[0].stdout }})"
+          - "  quay-valkey   : {{ container_statuses.results[1].stdout }} (Health: {{ health_statuses.results[1].stdout }})"
+          - "  quay-registry : {{ container_statuses.results[2].stdout }} (Health: {{ health_statuses.results[2].stdout }})"
+          - "  quay-nginx    : {{ container_statuses.results[3].stdout }} (Health: {{ health_statuses.results[3].stdout }})"
+          - ""
+          - "Endpoints & Checks:"
+          - "  PostgreSQL Ping       : {{ pg_test.stdout }}"
+          - "  Valkey Ping           : {{ valkey_test.stdout }}"
+          - "  Quay Internal Health  : HTTP {{ quay_internal_http.stdout }}"
+          - "  Nginx HTTP Redirect   : HTTP {{ nginx_http_redirect.stdout }} (redirects to HTTPS)"
+          - "  Nginx HTTPS Health    : HTTP {{ nginx_https_health.stdout }} (SSL termination)"
+          - "  Registry V2 API       : HTTP {{ registry_v2_code.stdout }}"
+          - "  Proxy Cache API       : {{ 'Enabled (FEATURE_PROXY_CACHE=true)' if proxy_cache_available else 'Disabled' }}"
+          - ""
+          - "Registry URL: https://quay.kubesoar.com"
+          - "========================================================"

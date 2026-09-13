@@ -1,0 +1,355 @@
+---
+# Ansible playbook to configure Microsoft Entra ID (Azure AD) OAuth/OIDC for Quay registry
+# Usage: ansible-playbook -i inventory.yml setup-quay-entraid.yml
+#
+# Prerequisites:
+#   - Azure CLI logged in (az login)
+#
+# Required variables (pass via environment or -e):
+#   - azure_tenant_id: Your Azure tenant ID
+#   - azure_subscription_id: Your Azure subscription ID
+#   - quay_domain: Quay hostname (default: quay.kubesoar.com)
+
+# Play 1: Create/Configure Azure AD App Registration
+- name: Configure Entra ID App Registration for Quay
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    HOME: "{{ lookup('env', 'HOME') }}"
+    AZURE_CONFIG_DIR: "{{ lookup('env', 'HOME') }}/.azure"
+  vars:
+    # Quay settings
+    quay_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    quay_domain: "{{ lookup('env', 'QUAY_DOMAIN') | default('quay.' + quay_base_domain, true) }}"
+
+    # Azure settings - must be provided
+    azure_tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
+    azure_subscription_id: "{{ lookup('env', 'AZURE_SUBSCRIPTION_ID') }}"
+
+    # App registration settings
+    app_display_name: "Quay-Registry-OAuth"
+    oauth_redirect_uri: "https://{{ quay_domain }}/oauth2/oidc/callback"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - azure_tenant_id | length > 0
+          - azure_subscription_id | length > 0
+        fail_msg: |
+          Missing required Azure credentials!
+          Please set these environment variables or pass them with -e:
+            - AZURE_TENANT_ID (or azure_tenant_id)
+            - AZURE_SUBSCRIPTION_ID (or azure_subscription_id)
+
+          Or run: az login && export AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
+
+    - name: Display configuration
+      ansible.builtin.debug:
+        msg:
+          - "Configuring Entra ID OAuth for Quay Registry"
+          - ""
+          - "App Name:     {{ app_display_name }}"
+          - "Redirect URI: {{ oauth_redirect_uri }}"
+          - "Tenant ID:    {{ azure_tenant_id }}"
+
+    # Step 1: Check or create Azure AD App Registration
+    - name: Check if app registration already exists
+      ansible.builtin.command:
+        cmd: >
+          az ad app list
+          --display-name "{{ app_display_name }}"
+          --query "[0].appId"
+          -o tsv
+      register: existing_app
+      changed_when: false
+      failed_when: false
+
+    - name: Create app registration
+      ansible.builtin.command:
+        cmd: >
+          az ad app create
+          --display-name "{{ app_display_name }}"
+          --web-redirect-uris "{{ oauth_redirect_uri }}"
+          --sign-in-audience AzureADMyOrg
+          --query "appId"
+          -o tsv
+      register: app_create
+      when: existing_app.stdout | length == 0
+
+    - name: Set app client ID
+      ansible.builtin.set_fact:
+        app_client_id: "{{ existing_app.stdout if existing_app.stdout | length > 0 else app_create.stdout }}"
+
+    - name: Display app client ID
+      ansible.builtin.debug:
+        msg: "App Client ID: {{ app_client_id }}"
+
+    # Step 2: Configure redirect URI if app already existed
+    - name: Update redirect URI for existing app
+      ansible.builtin.command:
+        cmd: >
+          az ad app update
+          --id {{ app_client_id }}
+          --web-redirect-uris "{{ oauth_redirect_uri }}"
+      when: existing_app.stdout | length > 0
+      changed_when: true
+
+    # Step 3: Add optional claims for tokens
+    - name: Configure optional claims (email, groups, preferred_username)
+      ansible.builtin.command:
+        cmd: >
+          az ad app update
+          --id {{ app_client_id }}
+          --optional-claims '{
+            "idToken": [
+              {"name": "email", "essential": false},
+              {"name": "groups", "essential": false},
+              {"name": "preferred_username", "essential": false}
+            ],
+            "accessToken": [
+              {"name": "email", "essential": false},
+              {"name": "groups", "essential": false},
+              {"name": "preferred_username", "essential": false}
+            ]
+          }'
+      changed_when: true
+
+    # Step 4: Add API permissions (Microsoft Graph)
+    - name: Add Microsoft Graph User.Read permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions e1fe6dd8-ba31-4d61-89e7-88639da4683d=Scope
+      register: user_read_perm
+      changed_when: "'already exists' not in user_read_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph email permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0=Scope
+      register: email_perm
+      changed_when: "'already exists' not in email_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph openid permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 37f7f235-527c-4136-accd-4a02d197296e=Scope
+      register: openid_perm
+      changed_when: "'already exists' not in openid_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph profile permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 14dad69e-099b-42c9-810b-d002981feec1=Scope
+      register: profile_perm
+      changed_when: "'already exists' not in profile_perm.stderr"
+      failed_when: false
+
+    # Step 5: Create client secret
+    - name: Create client secret
+      ansible.builtin.command:
+        cmd: >
+          az ad app credential reset
+          --id {{ app_client_id }}
+          --display-name "Quay-OAuth-Secret"
+          --years 2
+          --query "password"
+          -o tsv
+      register: client_secret
+      no_log: true
+
+    # Step 6: Create service principal if it doesn't exist
+    - name: Check if service principal exists
+      ansible.builtin.command:
+        cmd: >
+          az ad sp list
+          --filter "appId eq '{{ app_client_id }}'"
+          --query "[0].id"
+          -o tsv
+      register: existing_sp
+      changed_when: false
+      failed_when: false
+
+    - name: Create service principal
+      ansible.builtin.command:
+        cmd: az ad sp create --id {{ app_client_id }}
+      when: existing_sp.stdout | length == 0
+      register: sp_create
+      failed_when: false
+
+    # Step 7: Store facts for next play
+    - name: Save OAuth facts for laptop-server play
+      ansible.builtin.set_fact:
+        quay_app_client_id: "{{ app_client_id }}"
+        quay_oauth_client_secret: "{{ client_secret.stdout }}"
+        quay_azure_tenant_id: "{{ azure_tenant_id }}"
+        quay_app_display_name: "{{ app_display_name }}"
+        quay_oauth_redirect_uri: "{{ oauth_redirect_uri }}"
+      no_log: true
+
+
+# Play 2: Update Quay configuration on laptop-server and restart
+- name: Apply Entra ID OIDC Configuration to Quay Registry
+  hosts: laptop_libvirt_hosts
+  become: true
+  gather_facts: false
+  vars:
+    quay_config_dir: /opt/quay/config
+    quay_container_name: quay-registry
+    pg_user: "{{ quay_postgres_user | default('quay') }}"
+    pg_password: "{{ quay_postgres_password | default('quaypass') }}"
+    pg_database: "{{ quay_postgres_db | default('quay') }}"
+    default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
+    default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
+
+  tasks:
+    - name: Pull OAuth facts from localhost
+      ansible.builtin.set_fact:
+        app_client_id: "{{ hostvars['localhost']['quay_app_client_id'] }}"
+        client_secret: "{{ hostvars['localhost']['quay_oauth_client_secret'] }}"
+        tenant_id: "{{ hostvars['localhost']['quay_azure_tenant_id'] }}"
+      no_log: true
+
+    - name: Deploy updated Quay config.yaml with OIDC configuration
+      ansible.builtin.copy:
+        dest: "{{ quay_config_dir }}/config.yaml"
+        mode: '0644'
+        content: |
+          SERVER_HOSTNAME: quay.kubesoar.com
+          REGISTRY_TITLE: "Homelab Quay Registry"
+          REGISTRY_TITLE_SHORT: "Quay"
+          SETUP_COMPLETE: true
+          AUTHENTICATION_TYPE: Database
+          PREFERRED_URL_SCHEME: https
+
+          FEATURE_BUILD_SUPPORT: false
+          FEATURE_USER_INITIALIZE: true
+          FEATURE_USER_CREATION: true
+          FEATURE_DIRECT_LOGIN: true
+          FEATURE_ANONYMOUS_ACCESS: true
+          FEATURE_MAILING: false
+
+          # Proxy Cache & Garbage Collection
+          FEATURE_PROXY_CACHE: true
+          FEATURE_GARBAGE_COLLECTION: true
+          FEATURE_CHANGE_TAG_EXPIRATION: true
+          DEFAULT_TAG_EXPIRATION: "14d"
+          TAG_EXPIRATION_OPTIONS:
+            - "0s"
+            - "1d"
+            - "7d"
+            - "14d"
+            - "30d"
+            - "60d"
+            - "90d"
+
+          SUPER_USERS:
+            - jwhiteaker
+            - admin
+
+          # Microsoft Entra ID (Azure AD) OpenID Connect Configuration
+          OIDC_LOGIN_CONFIG:
+            CLIENT_ID: "{{ app_client_id }}"
+            CLIENT_SECRET: "{{ client_secret }}"
+            OIDC_SERVER: "https://login.microsoftonline.com/{{ tenant_id }}/v2.0/"
+            SERVICE_NAME: "Microsoft Entra ID"
+            SERVICE_ICON: "microsoft"
+            LOGIN_SCOPES:
+              - openid
+              - profile
+              - email
+
+          # Database connection using Pi-hole domain name
+          DB_URI: "postgresql://{{ pg_user }}:{{ pg_password }}@quay-postgres.kubesoar.com:5432/{{ pg_database }}"
+          DB_CONNECTION_ARGS:
+            autorollback: true
+            threadlocals: true
+
+          # Valkey caching using Pi-hole domain name
+          BUILDLOGS_REDIS:
+            host: "quay-valkey.kubesoar.com"
+            port: 6379
+          USER_EVENTS_REDIS:
+            host: "quay-valkey.kubesoar.com"
+            port: 6379
+
+          # Storage
+          DISTRIBUTED_STORAGE_PREFERENCE:
+            - default
+          DISTRIBUTED_STORAGE_CONFIG:
+            default:
+              - LocalStorage
+              - storage_path: /datastorage/registry
+
+          SECRET_KEY: "{{ lookup('env', 'QUAY_SECRET_KEY') | default(default_secret_key, true) }}"
+          DATABASE_SECRET_KEY: "{{ lookup('env', 'QUAY_DATABASE_SECRET_KEY') | default(default_db_secret_key, true) }}"
+
+    - name: Restart Quay Registry container to apply Entra ID configuration
+      ansible.builtin.command:
+        cmd: sudo podman restart {{ quay_container_name }}
+
+    - name: Wait for Quay Registry container to report healthy
+      ansible.builtin.command:
+        cmd: "sudo podman exec {{ quay_container_name }} curl -k -s -o /dev/null -w '%{http_code}' https://127.0.0.1:8443/health/instance"
+      register: quay_health
+      until: quay_health.stdout == '200'
+      retries: 30
+      delay: 5
+      changed_when: false
+
+
+# Play 3: Verify and summary report
+- name: Verify Quay OAuth Integration and Display Summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Wait for Quay Nginx ingress to respond
+      ansible.builtin.command:
+        cmd: "curl -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/health/instance"
+      register: nginx_health
+      until: nginx_health.stdout == '200'
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================================"
+          - "    Quay Microsoft Entra ID Integration Complete!       "
+          - "========================================================"
+          - ""
+          - "Azure App Registration:"
+          - "  Display Name: {{ hostvars['localhost']['quay_app_display_name'] }}"
+          - "  Client ID:    {{ hostvars['localhost']['quay_app_client_id'] }}"
+          - "  Tenant ID:    {{ hostvars['localhost']['quay_azure_tenant_id'] }}"
+          - "  Redirect URI: {{ hostvars['localhost']['quay_oauth_redirect_uri'] }}"
+          - ""
+          - "Quay Configuration:"
+          - "  Registry URL: https://quay.kubesoar.com"
+          - "  Sign-in URL:  https://quay.kubesoar.com/signin/"
+          - "  OIDC Server:  https://login.microsoftonline.com/{{ hostvars['localhost']['quay_azure_tenant_id'] }}/v2.0/"
+          - "  Service Name: Microsoft Entra ID"
+          - "  Auth Mode:    Database (Direct Login) + Entra ID OIDC"
+          - ""
+          - "How to log in:"
+          - "  1. Visit https://quay.kubesoar.com and click 'Sign in with Microsoft Entra ID'."
+          - "  2. Direct database credentials (admin/jwhiteaker) remain fully functional."
+          - "========================================================"

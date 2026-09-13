@@ -1,0 +1,78 @@
+---
+# Ansible playbook to add Quay DNS records to Pi-hole
+# Usage: ansible-playbook -i inventory.yml add-quay-dns-to-pihole.yml
+
+- name: Add Quay DNS records to Pi-hole
+  hosts: pihole
+  gather_facts: false
+  vars:
+    pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
+    pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
+    ansible_user: "{{ pihole_ssh_username }}"
+    ansible_password: "{{ pihole_ssh_password }}"
+    dnsmasq_config_file: "quay.conf"
+    quay_records:
+      - name: "quay-postgres.kubesoar.com"
+        ip: "192.168.1.30"
+      - name: "quay-valkey.kubesoar.com"
+        ip: "192.168.1.31"
+      - name: "quay-registry.kubesoar.com"
+        ip: "192.168.1.32"
+      - name: "quay.kubesoar.com"
+        ip: "192.168.1.33"
+
+  tasks:
+    - name: Create Quay dnsmasq configuration on Pi-hole
+      ansible.builtin.copy:
+        dest: "{{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Quay Registry stack DNS records
+          {% for record in quay_records %}
+          address=/{{ record.name }}/{{ record.ip }}
+          {% endfor %}
+      notify: Restart pihole-FTL
+
+    - name: Also sync updated okd.conf to Pi-hole
+      ansible.builtin.copy:
+        src: ../dnsmasq/okd.conf
+        dest: "{{ dnsmasq_conf_dir }}/okd.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart pihole-FTL
+
+    - name: Flush handlers to restart pihole-FTL immediately if changed
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify pihole-FTL syntax
+      ansible.builtin.command:
+        cmd: pihole-FTL --test
+      changed_when: false
+      register: ftl_test
+      failed_when: ftl_test.rc != 0
+
+    - name: Verify DNS records resolve on Pi-hole
+      ansible.builtin.command:
+        cmd: "dig +short @127.0.0.1 {{ item.name }}"
+      loop: "{{ quay_records }}"
+      register: dig_results
+      changed_when: false
+      failed_when: dig_results.stdout != item.ip
+
+    - name: Display Quay DNS confirmation
+      ansible.builtin.debug:
+        msg:
+          - "Quay DNS records successfully configured on Pi-hole!"
+          - "quay-postgres.kubesoar.com -> 192.168.1.30"
+          - "quay-valkey.kubesoar.com -> 192.168.1.31"
+          - "quay-registry.kubesoar.com -> 192.168.1.32"
+          - "quay.kubesoar.com -> 192.168.1.33"
+
+  handlers:
+    - name: Restart pihole-FTL
+      ansible.builtin.service:
+        name: pihole-FTL
+        state: restarted

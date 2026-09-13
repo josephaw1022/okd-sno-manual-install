@@ -1,0 +1,127 @@
+---
+# Ansible playbook to transfer Let's Encrypt certificate for quay.kubesoar.com to laptop-server
+# and restart Quay and Nginx containers.
+# Usage: ansible-playbook -i inventory.yml transfer-quay-cert.yml
+
+- name: Transfer Quay Certificate to laptop-server
+  hosts: laptop_libvirt_hosts
+  become: true
+  vars:
+    cert_domain: "quay.kubesoar.com"
+    letsencrypt_dir: "/etc/letsencrypt/live/{{ cert_domain }}"
+    quay_config_dir: "/opt/quay/config"
+    nginx_config_dir: "/opt/quay-nginx"
+
+  tasks:
+    - name: Read certificate file from local laptop
+      ansible.builtin.slurp:
+        src: "{{ letsencrypt_dir }}/fullchain.pem"
+      register: cert_content
+      delegate_to: localhost
+      become: true
+
+    - name: Read private key file from local laptop
+      ansible.builtin.slurp:
+        src: "{{ letsencrypt_dir }}/privkey.pem"
+      register: key_content
+      delegate_to: localhost
+      become: true
+      no_log: true
+
+    - name: Ensure Nginx certs directory exists
+      ansible.builtin.file:
+        path: "{{ nginx_config_dir }}/certs"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Write certificate to Nginx directory
+      ansible.builtin.copy:
+        content: "{{ cert_content.content | b64decode }}"
+        dest: "{{ nginx_config_dir }}/certs/quay.crt"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Quay Nginx
+
+    - name: Write private key to Nginx directory
+      ansible.builtin.copy:
+        content: "{{ key_content.content | b64decode }}"
+        dest: "{{ nginx_config_dir }}/certs/quay.key"
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      notify: Restart Quay Nginx
+
+    - name: Ensure Quay config directory exists
+      ansible.builtin.file:
+        path: "{{ quay_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Write certificate to Quay config directory
+      ansible.builtin.copy:
+        content: "{{ cert_content.content | b64decode }}"
+        dest: "{{ quay_config_dir }}/ssl.cert"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Quay Registry
+
+    - name: Write private key to Quay config directory
+      ansible.builtin.copy:
+        content: "{{ key_content.content | b64decode }}"
+        dest: "{{ quay_config_dir }}/ssl.key"
+        owner: root
+        group: root
+        mode: '0644'
+      no_log: true
+      notify: Restart Quay Registry
+
+    - name: Flush handlers to restart containers immediately
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for Quay Registry container to report healthy on port 8443
+      ansible.builtin.uri:
+        url: "https://192.168.1.32:8443/health/instance"
+        method: GET
+        status_code: 200
+        validate_certs: false
+      register: quay_health
+      until: quay_health.status == 200
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Wait for Quay Nginx ingress to respond on HTTPS
+      ansible.builtin.command:
+        cmd: "curl -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/health/instance"
+      delegate_to: localhost
+      register: nginx_health
+      until: nginx_health.stdout == '200'
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "Quay certificate transferred and containers restarted successfully!"
+          - "Certificate source: /etc/letsencrypt/live/{{ cert_domain }}"
+          - "Nginx cert: {{ nginx_config_dir }}/certs/quay.crt"
+          - "Quay cert:  {{ quay_config_dir }}/ssl.cert"
+          - "Restarted: quay-registry, quay-nginx"
+          - "Health: https://quay.kubesoar.com/health/instance -> HTTP 200"
+
+  handlers:
+    - name: Restart Quay Registry
+      ansible.builtin.command:
+        cmd: sudo podman restart quay-registry
+
+    - name: Restart Quay Nginx
+      ansible.builtin.command:
+        cmd: sudo podman restart quay-nginx
