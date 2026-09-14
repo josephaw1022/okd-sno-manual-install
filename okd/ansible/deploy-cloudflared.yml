@@ -1,0 +1,170 @@
+---
+# Ansible playbook to deploy Cloudflare Tunnel (cloudflared) to OKD/Kubernetes
+# Usage: ansible-playbook -i inventory.yml deploy-cloudflared.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#   - cloudflare_tunnel_token configured in group_vars/all.yml
+
+- name: Deploy Cloudflare Tunnel (cloudflared)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cloudflared_namespace: "{{ lookup('env', 'CLOUDFLARED_NAMESPACE') | default('cloudflared', true) }}"
+    cloudflared_secret_name: "{{ lookup('env', 'CLOUDFLARED_SECRET_NAME') | default('tunnel-token', true) }}"
+    cloudflared_deployment_name: "{{ lookup('env', 'CLOUDFLARED_DEPLOYMENT_NAME') | default('cloudflared', true) }}"
+    cloudflared_pdb_name: "{{ lookup('env', 'CLOUDFLARED_PDB_NAME') | default('cloudflared-availability', true) }}"
+    cloudflared_replicas: "{{ lookup('env', 'CLOUDFLARED_REPLICAS') | default(3, true) }}"
+    cloudflared_image: "{{ lookup('env', 'CLOUDFLARED_IMAGE') | default('cloudflare/cloudflared:latest', true) }}"
+    cloudflared_min_available: "{{ lookup('env', 'CLOUDFLARED_MIN_AVAILABLE') | default(1, true) }}"
+    cloudflare_tunnel_token_effective: >-
+      {{
+        cloudflare_tunnel_token
+        | default(cloudflared_tunnel_token, true)
+        | default(lookup('env', 'CLOUDFLARE_TUNNEL_TOKEN'), true)
+      }}
+
+  tasks:
+    - name: Validate Cloudflare tunnel token is set
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_token_effective is defined
+          - cloudflare_tunnel_token_effective | length > 0
+        fail_msg: "Set cloudflare_tunnel_token in ansible/group_vars/all.yml or pass CLOUDFLARE_TUNNEL_TOKEN."
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: default
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' or 'make login' first, or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure cloudflared namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ cloudflared_namespace }}"
+
+    - name: Grant anyuid SCC to default service account
+      ansible.builtin.command:
+        cmd: oc adm policy add-scc-to-user anyuid -z default -n {{ cloudflared_namespace }}
+      register: cloudflared_scc_grant
+      changed_when: "'added' in cloudflared_scc_grant.stdout"
+      failed_when: false
+      retries: 5
+      delay: 2
+      until: cloudflared_scc_grant.rc == 0
+
+    - name: Ensure cloudflared secret exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ cloudflared_secret_name }}"
+            namespace: "{{ cloudflared_namespace }}"
+          type: Opaque
+          stringData:
+            token: "{{ cloudflare_tunnel_token_effective }}"
+      no_log: true
+
+    - name: Ensure cloudflared deployment exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ cloudflared_deployment_name }}"
+            namespace: "{{ cloudflared_namespace }}"
+          spec:
+            replicas: "{{ cloudflared_replicas | int }}"
+            selector:
+              matchLabels:
+                pod: "{{ cloudflared_deployment_name }}"
+            strategy:
+              rollingUpdate:
+                maxSurge: 25%
+                maxUnavailable: 25%
+              type: RollingUpdate
+            template:
+              metadata:
+                labels:
+                  pod: "{{ cloudflared_deployment_name }}"
+              spec:
+                securityContext:
+                  sysctls:
+                    - name: net.ipv4.ping_group_range
+                      value: "0 65535"
+                containers:
+                  - name: cloudflared
+                    image: "{{ cloudflared_image }}"
+                    imagePullPolicy: Always
+                    command:
+                      - cloudflared
+                      - tunnel
+                      - --no-autoupdate
+                      - --loglevel
+                      - info
+                      - --metrics
+                      - 0.0.0.0:2000
+                      - run
+                    env:
+                      - name: TUNNEL_TOKEN
+                        valueFrom:
+                          secretKeyRef:
+                            name: "{{ cloudflared_secret_name }}"
+                            key: token
+                    livenessProbe:
+                      httpGet:
+                        path: /ready
+                        port: 2000
+                      initialDelaySeconds: 10
+                      periodSeconds: 10
+                      failureThreshold: 1
+
+    - name: Ensure cloudflared pod disruption budget exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: policy/v1
+          kind: PodDisruptionBudget
+          metadata:
+            name: "{{ cloudflared_pdb_name }}"
+            namespace: "{{ cloudflared_namespace }}"
+          spec:
+            minAvailable: "{{ cloudflared_min_available | int }}"
+            selector:
+              matchLabels:
+                pod: "{{ cloudflared_deployment_name }}"
+
+    - name: Wait for cloudflared pods to roll out
+      ansible.builtin.command:
+        cmd: oc rollout status deployment/{{ cloudflared_deployment_name }} -n {{ cloudflared_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "Cloudflare Tunnel Deployed Successfully!"
+          - "============================================"
+          - "Deployment: {{ cloudflared_deployment_name }}"
+          - "Namespace:  {{ cloudflared_namespace }}"
+          - "Replicas:   {{ cloudflared_replicas }}"
+          - "Image:      {{ cloudflared_image }}"

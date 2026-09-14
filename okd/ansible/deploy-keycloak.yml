@@ -1,0 +1,138 @@
+---
+# Ansible playbook to deploy Keycloak CR
+# Usage: ansible-playbook -i inventory.yml deploy-keycloak.yml
+#
+# Reference: https://gist.github.com/josephaw1022/11fad76bc09105f3242149886399bfc8
+
+- name: Deploy Keycloak CR
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_name: "{{ lookup('env', 'KEYCLOAK_NAME') | default('keycloak', true) }}"
+    keycloak_instances: "{{ lookup('env', 'KEYCLOAK_INSTANCES') | default(3, true) | int }}"
+    keycloak_hostname: "{{ lookup('env', 'KEYCLOAK_HOSTNAME') | default('keycloak.homelab.kubesoar.com', true) }}"
+    keycloak_ingress_class: "{{ lookup('env', 'KEYCLOAK_INGRESS_CLASS') | default('istio', true) }}"
+    keycloak_tls_secret: "{{ lookup('env', 'KEYCLOAK_TLS_SECRET') | default('keycloak-tls', true) }}"
+    keycloak_cluster_issuer: "{{ lookup('env', 'KEYCLOAK_CLUSTER_ISSUER') | default('cloudflare-dns01', true) }}"
+    keycloak_db_host: "{{ lookup('env', 'KEYCLOAK_DB_HOST') | default('keycloak-postgres-cluster-rw', true) }}"
+    keycloak_db_port: "{{ lookup('env', 'KEYCLOAK_DB_PORT') | default(5432, true) | int }}"
+    keycloak_db_name: "{{ lookup('env', 'KEYCLOAK_DB_NAME') | default('keycloak', true) }}"
+    keycloak_db_secret_name: "{{ lookup('env', 'KEYCLOAK_DB_SECRET_NAME') | default('keycloak-postgres-cluster-app', true) }}"
+    keycloak_strict_hostname: "{{ lookup('env', 'KEYCLOAK_STRICT_HOSTNAME') | default('false', true) | bool }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure keycloak namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+
+    - name: Grant anyuid SCC to serviceaccounts in keycloak namespace
+      ansible.builtin.command:
+        cmd: oc adm policy add-scc-to-group anyuid system:serviceaccounts:{{ keycloak_namespace }}
+      register: scc_grant
+      changed_when: "'added' in scc_grant.stdout"
+      failed_when: false
+
+    - name: Build Keycloak CR definition YAML
+      ansible.builtin.set_fact:
+        keycloak_cr_yaml: |
+          apiVersion: k8s.keycloak.org/v2beta1
+          kind: Keycloak
+          metadata:
+            name: {{ keycloak_name }}
+            namespace: {{ keycloak_namespace }}
+          spec:
+            instances: {{ keycloak_instances | int }}
+            db:
+              vendor: postgres
+              host: {{ keycloak_db_host }}
+              port: {{ keycloak_db_port | int }}
+              database: {{ keycloak_db_name }}
+              usernameSecret:
+                name: {{ keycloak_db_secret_name }}
+                key: username
+              passwordSecret:
+                name: {{ keycloak_db_secret_name }}
+                key: password
+            hostname:
+              hostname: {{ keycloak_hostname }}
+              strict: {{ keycloak_strict_hostname | string | lower }}
+            http:
+              httpEnabled: true
+              serviceName: keycloak-service
+              serviceHttpPort: 80
+              serviceHttpsPort: 443
+            ingress:
+              enabled: true
+              className: {{ keycloak_ingress_class }}
+              tlsSecret: {{ keycloak_tls_secret }}
+              annotations:
+                cert-manager.io/cluster-issuer: {{ keycloak_cluster_issuer }}
+                external-dns.alpha.kubernetes.io/hostname: {{ keycloak_hostname }}
+            proxy:
+              headers: xforwarded
+            networkPolicy:
+              enabled: false
+
+    - name: Apply Keycloak Custom Resource
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ keycloak_cr_yaml | from_yaml }}"
+
+    - name: Wait for Keycloak TLS Secret to be issued
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_tls_secret }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: tls_sec_info
+      until: tls_sec_info.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Sync TLS Secret to istio-ingress namespace
+      when: keycloak_ingress_class == 'istio' and tls_sec_info.resources | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ keycloak_tls_secret }}"
+            namespace: istio-ingress
+          type: kubernetes.io/tls
+          data: "{{ tls_sec_info.resources[0].data }}"
+
+    - name: Display Keycloak deployment status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak CR applied successfully!"
+          - "Name: {{ keycloak_name }}"
+          - "Namespace: {{ keycloak_namespace }}"
+          - "Hostname: {{ keycloak_hostname }}"
+          - "Ingress Class: {{ keycloak_ingress_class }}"
+          - "TLS Secret: {{ keycloak_tls_secret }}"
+          - "ClusterIssuer: {{ keycloak_cluster_issuer }}"
+          - "Database: {{ keycloak_db_host }}:{{ keycloak_db_port }}/{{ keycloak_db_name }}"

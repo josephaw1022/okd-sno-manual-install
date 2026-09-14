@@ -44,6 +44,10 @@
           kind: Namespace
           metadata:
             name: "{{ metallb_namespace }}"
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+              pod-security.kubernetes.io/audit: privileged
+              pod-security.kubernetes.io/warn: privileged
 
     - name: Ensure MetalLB speaker SCC cluster role binding exists
       kubernetes.core.k8s:
@@ -77,6 +81,23 @@
           subjects:
             - kind: ServiceAccount
               name: metallb-controller
+              namespace: "{{ metallb_namespace }}"
+
+    - name: Ensure MetalLB FRR-K8s SCC cluster role binding exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: metallb-frr-k8s-scc-privileged
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:privileged
+          subjects:
+            - kind: ServiceAccount
+              name: metallb-frr-k8s-controller
               namespace: "{{ metallb_namespace }}"
 
     - name: Ensure MetalLB Helm repo is configured

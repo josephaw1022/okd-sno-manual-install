@@ -55,6 +55,8 @@
           --namespace {{ istio_namespace }}
           --create-namespace
           --set profile=ambient
+          --set meshConfig.ingressSelector=ingress
+          --set meshConfig.ingressService=istio-ingress
           --wait
           --timeout 10m
           {{ ('--version ' ~ istio_chart_version) if (istio_chart_version | length > 0) else '' }}

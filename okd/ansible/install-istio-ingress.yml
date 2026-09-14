@@ -16,6 +16,7 @@
     istio_ingress_release: "{{ lookup('env', 'ISTIO_INGRESS_RELEASE') | default('istio-ingress', true) }}"
     istio_chart_version: "{{ lookup('env', 'ISTIO_CHART_VERSION') | default('', true) }}"
     istio_global_platform: "{{ lookup('env', 'ISTIO_GLOBAL_PLATFORM') | default('openshift', true) }}"
+    istio_ingress_loadbalancer_ip: "{{ lookup('env', 'ISTIO_INGRESS_LOADBALANCER_IP') | default('192.168.1.230', true) }}"
 
   tasks:
     - name: Verify Helm is installed
@@ -56,6 +57,7 @@
           --namespace {{ istio_ingress_namespace }}
           --create-namespace
           --set global.platform={{ istio_global_platform }}
+          --set-string service.annotations."metallb\.universe\.tf/loadBalancerIPs"={{ istio_ingress_loadbalancer_ip }}
           --wait
           --timeout 10m
           {{ ('--version ' ~ istio_chart_version) if (istio_chart_version | length > 0) else '' }}

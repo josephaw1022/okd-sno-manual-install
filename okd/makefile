@@ -910,13 +910,50 @@ install-gitops: ## Install OKD GitOps (ArgoCD).
 	@echo "✅ GitOps installed"
 
 
+CERT_MANAGER_NAMESPACE ?= cert-manager
+CERT_MANAGER_HELM_RELEASE ?= cert-manager
+CERT_MANAGER_CHART_VERSION ?= v1.17.1
+
 .PHONY: install-cert-manager
-install-cert-manager: ## Install cert-manager operator (required by RabbitMQ topology operator).
-	@echo "📜 Installing cert-manager operator..."
+install-cert-manager: ## Install cert-manager via Helm chart.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "📜 Installing cert-manager via Helm..."
 	@pushd ansible > /dev/null && \
+	CERT_MANAGER_NAMESPACE="$(CERT_MANAGER_NAMESPACE)" \
+	CERT_MANAGER_HELM_RELEASE="$(CERT_MANAGER_HELM_RELEASE)" \
+	CERT_MANAGER_CHART_VERSION="$(CERT_MANAGER_CHART_VERSION)" \
 	ansible-playbook -i inventory.yml install-cert-manager.yml && \
 	popd > /dev/null
-	@echo "✅ cert-manager operator installed"
+	@echo "✅ cert-manager installed"
+
+
+.PHONY: uninstall-cert-manager
+uninstall-cert-manager: ## Uninstall cert-manager Helm release and namespace.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling cert-manager Helm release..."
+	@pushd ansible > /dev/null && \
+	CERT_MANAGER_NAMESPACE="$(CERT_MANAGER_NAMESPACE)" \
+	CERT_MANAGER_HELM_RELEASE="$(CERT_MANAGER_HELM_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-cert-manager.yml && \
+	popd > /dev/null
+	@echo "✅ cert-manager uninstall requested"
+
+
+.PHONY: configure-cloudflare-clusterissuer setup-cloudflare-clusterissuer
+configure-cloudflare-clusterissuer: ## Configure Cloudflare secret and ClusterIssuer for cert-manager.
+	@echo "🔐 Configuring Cloudflare secret and cert-manager ClusterIssuer..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-cloudflare-clusterissuer.yml && \
+	popd > /dev/null
+	@echo "✅ Cloudflare ClusterIssuer configured"
+
+setup-cloudflare-clusterissuer: configure-cloudflare-clusterissuer
 
 
 .PHONY: install-stolostron
@@ -1277,6 +1314,7 @@ ISTIO_CNI_RELEASE ?= istio-cni
 ISTIO_ZTUNNEL_RELEASE ?= ztunnel
 ISTIO_INGRESS_RELEASE ?= istio-ingress
 ISTIO_INGRESS_CLASS_NAME ?= istio
+ISTIO_INGRESS_LOADBALANCER_IP ?= 192.168.1.230
 ISTIO_CHART_VERSION ?=
 GATEWAY_API_CRDS_URL ?= https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml
 
@@ -1446,6 +1484,7 @@ install-istio-ingress: ## Install Istio ingress gateway Helm chart.
 	ISTIO_HELM_REPO_URL="$(ISTIO_HELM_REPO_URL)" \
 	ISTIO_INGRESS_RELEASE="$(ISTIO_INGRESS_RELEASE)" \
 	ISTIO_CHART_VERSION="$(ISTIO_CHART_VERSION)" \
+	ISTIO_INGRESS_LOADBALANCER_IP="$(ISTIO_INGRESS_LOADBALANCER_IP)" \
 	ansible-playbook -i inventory.yml install-istio-ingress.yml && \
 	popd > /dev/null
 	@echo "✅ Istio ingress gateway installed"
@@ -1522,6 +1561,7 @@ METALLB_CHART_VERSION ?=
 METALLB_ADDRESS_RANGE ?= 192.168.1.230-192.168.1.249
 METALLB_IPADDRESSPOOL_NAME ?= default-address-pool
 METALLB_L2ADVERTISEMENT_NAME ?= default-l2-advertisement
+HOMELAB_LB_IP ?= 192.168.1.230
 
 
 .PHONY: install-metallb
@@ -1580,3 +1620,139 @@ uninstall-metallb-l2-config: ## Uninstall MetalLB IPAddressPool and L2Advertisem
 	ansible-playbook -i inventory.yml uninstall-metallb-l2-config.yml && \
 	popd > /dev/null
 	@echo "✅ MetalLB L2 configuration uninstall requested"
+
+
+.PHONY: configure-homelab-dns
+configure-homelab-dns: ## Configure Pi-hole with wildcard DNS for *.homelab.kubesoar.com pointing to MetalLB IP.
+	@echo "🌐 Configuring Pi-hole DNS for *.homelab.$(BASE_DOMAIN) -> $(HOMELAB_LB_IP)..."
+	@pushd ansible > /dev/null && \
+	HOMELAB_LB_IP="$(HOMELAB_LB_IP)" \
+	ansible-playbook -i inventory.yml configure-homelab-dns.yml && \
+	popd > /dev/null
+	@echo "✅ Homelab wildcard DNS configured on Pi-hole"
+
+
+.PHONY: install-metallb-all
+install-metallb-all: install-metallb install-metallb-l2-config configure-homelab-dns ## Install MetalLB, configure L2 address pool, and configure homelab wildcard DNS.
+
+
+##@ Cloudflare Tunnel
+
+CLOUDFLARED_NAMESPACE ?= cloudflared
+CLOUDFLARED_REPLICAS ?= 3
+CLOUDFLARED_IMAGE ?= cloudflare/cloudflared:latest
+
+.PHONY: deploy-cloudflared install-cloudflared
+deploy-cloudflared: ## Deploy Cloudflare Tunnel (cloudflared) to OKD cluster via Ansible.
+	@echo "🌐 Deploying Cloudflare Tunnel (cloudflared)..."
+	@pushd ansible > /dev/null && \
+	CLOUDFLARED_NAMESPACE="$(CLOUDFLARED_NAMESPACE)" \
+	CLOUDFLARED_REPLICAS="$(CLOUDFLARED_REPLICAS)" \
+	CLOUDFLARED_IMAGE="$(CLOUDFLARED_IMAGE)" \
+	ansible-playbook -i inventory.yml deploy-cloudflared.yml && \
+	popd > /dev/null
+	@echo "✅ Cloudflare Tunnel deployed"
+
+install-cloudflared: deploy-cloudflared
+
+
+.PHONY: destroy-cloudflared uninstall-cloudflared
+destroy-cloudflared: ## Destroy Cloudflare Tunnel (cloudflared) deployment and namespace via Ansible.
+	@echo "💥 Destroying Cloudflare Tunnel (cloudflared)..."
+	@pushd ansible > /dev/null && \
+	CLOUDFLARED_NAMESPACE="$(CLOUDFLARED_NAMESPACE)" \
+	ansible-playbook -i inventory.yml destroy-cloudflared.yml && \
+	popd > /dev/null
+	@echo "✅ Cloudflare Tunnel destroyed"
+
+uninstall-cloudflared: destroy-cloudflared
+
+
+##@ Keycloak
+
+KEYCLOAK_NAMESPACE ?= keycloak
+KEYCLOAK_NAME ?= keycloak
+KEYCLOAK_INSTANCES ?= 3
+KEYCLOAK_HOSTNAME ?= keycloak.homelab.$(BASE_DOMAIN)
+KEYCLOAK_INGRESS_CLASS ?= istio
+KEYCLOAK_TLS_SECRET ?= keycloak-tls
+KEYCLOAK_CLUSTER_ISSUER ?= cloudflare-dns01
+KEYCLOAK_DB_HOST ?= keycloak-postgres-cluster-rw
+KEYCLOAK_DB_PORT ?= 5432
+KEYCLOAK_DB_NAME ?= keycloak
+KEYCLOAK_DB_SECRET_NAME ?= keycloak-postgres-cluster-app
+KEYCLOAK_POSTGRES_NAME ?= keycloak-postgres-cluster
+KEYCLOAK_POSTGRES_INSTANCES ?= 3
+KEYCLOAK_POSTGRES_STORAGE_SIZE ?= 5Gi
+KEYCLOAK_POSTGRES_STORAGE_CLASS ?=
+KEYCLOAK_K8S_KUSTOMIZE ?= github.com/keycloak/keycloak-k8s-resources/kubernetes?ref=26.7.0
+
+
+.PHONY: install-keycloak-operator
+install-keycloak-operator: ## Install Keycloak Operator via kustomize.
+	@echo "📦 Installing Keycloak Operator in namespace $(KEYCLOAK_NAMESPACE)..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_K8S_KUSTOMIZE="$(KEYCLOAK_K8S_KUSTOMIZE)" \
+	ansible-playbook -i inventory.yml install-keycloak-operator.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak Operator installed"
+
+
+.PHONY: deploy-keycloak-postgres deploy-keycloak-db
+deploy-keycloak-postgres: ## Deploy CloudNativePG PostgreSQL Cluster for Keycloak.
+	@echo "🐘 Deploying CloudNativePG PostgreSQL cluster for Keycloak..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_POSTGRES_NAME="$(KEYCLOAK_POSTGRES_NAME)" \
+	KEYCLOAK_POSTGRES_INSTANCES="$(KEYCLOAK_POSTGRES_INSTANCES)" \
+	KEYCLOAK_POSTGRES_DATABASE="$(KEYCLOAK_DB_NAME)" \
+	KEYCLOAK_POSTGRES_STORAGE_SIZE="$(KEYCLOAK_POSTGRES_STORAGE_SIZE)" \
+	KEYCLOAK_POSTGRES_STORAGE_CLASS="$(KEYCLOAK_POSTGRES_STORAGE_CLASS)" \
+	ansible-playbook -i inventory.yml deploy-keycloak-postgres.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak PostgreSQL cluster deployed"
+
+deploy-keycloak-db: deploy-keycloak-postgres
+
+
+.PHONY: deploy-keycloak
+deploy-keycloak: ## Deploy Keycloak Custom Resource (Istio ingress, cert-manager TLS, CNPG DB).
+	@echo "👑 Deploying Keycloak CR ($(KEYCLOAK_NAME)) at $(KEYCLOAK_HOSTNAME)..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_INSTANCES="$(KEYCLOAK_INSTANCES)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_INGRESS_CLASS="$(KEYCLOAK_INGRESS_CLASS)" \
+	KEYCLOAK_TLS_SECRET="$(KEYCLOAK_TLS_SECRET)" \
+	KEYCLOAK_CLUSTER_ISSUER="$(KEYCLOAK_CLUSTER_ISSUER)" \
+	KEYCLOAK_DB_HOST="$(KEYCLOAK_DB_HOST)" \
+	KEYCLOAK_DB_PORT="$(KEYCLOAK_DB_PORT)" \
+	KEYCLOAK_DB_NAME="$(KEYCLOAK_DB_NAME)" \
+	KEYCLOAK_DB_SECRET_NAME="$(KEYCLOAK_DB_SECRET_NAME)" \
+	ansible-playbook -i inventory.yml deploy-keycloak.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak CR deployed"
+
+
+.PHONY: install-keycloak setup-keycloak
+install-keycloak: install-keycloak-operator deploy-keycloak-postgres deploy-keycloak ## Install Keycloak Operator, PostgreSQL cluster, and Keycloak CR.
+	@echo "🎉 Keycloak complete setup finished"
+
+setup-keycloak: install-keycloak
+
+
+.PHONY: uninstall-keycloak destroy-keycloak
+uninstall-keycloak: ## Uninstall Keycloak CR, PostgreSQL cluster, and operator.
+	@echo "🗑️ Uninstalling Keycloak..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_POSTGRES_NAME="$(KEYCLOAK_POSTGRES_NAME)" \
+	KEYCLOAK_K8S_KUSTOMIZE="$(KEYCLOAK_K8S_KUSTOMIZE)" \
+	ansible-playbook -i inventory.yml uninstall-keycloak.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak uninstalled"
+
+destroy-keycloak: uninstall-keycloak

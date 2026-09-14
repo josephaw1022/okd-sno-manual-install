@@ -1,0 +1,107 @@
+---
+# Ansible playbook to configure Cloudflare token Secret and cert-manager ClusterIssuer
+# Usage: ansible-playbook -i inventory.yml configure-cloudflare-clusterissuer.yml
+#
+# Prerequisites:
+#   - Connected to OpenShift cluster (oc login)
+#   - cert-manager installed (make install-cert-manager)
+#   - cloudflare_api_token set in ansible/group_vars/all.yml or CLOUDFLARE_API_TOKEN env var
+
+- name: Configure Cloudflare Secret and ClusterIssuer for cert-manager
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cert_manager_namespace: "{{ lookup('env', 'CERT_MANAGER_NAMESPACE') | default('cert-manager', true) }}"
+    cloudflare_api_token_secret_name: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN_SECRET_NAME') | default('cloudflare-api-token-secret', true) }}"
+    cloudflare_cluster_issuer_name: "{{ lookup('env', 'CLOUDFLARE_CLUSTER_ISSUER_NAME') | default('cloudflare-dns01', true) }}"
+    acme_email: "{{ lookup('env', 'ACME_EMAIL') | default('josephaw1022@gmail.com', true) }}"
+    cloudflare_base_domain: "{{ lookup('env', 'CLOUDFLARE_BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    acme_server: "{{ lookup('env', 'ACME_SERVER') | default('https://acme-v02.api.letsencrypt.org/directory', true) }}"
+    cloudflare_api_token_effective: >-
+      {{
+        cloudflare_api_token
+        | default(lookup('env', 'CLOUDFLARE_API_TOKEN'), true)
+      }}
+
+  tasks:
+    - name: Validate Cloudflare API token is set
+      ansible.builtin.assert:
+        that:
+          - cloudflare_api_token_effective is defined
+          - cloudflare_api_token_effective | length > 0
+        fail_msg: "Set cloudflare_api_token in ansible/group_vars/all.yml or pass CLOUDFLARE_API_TOKEN."
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: default
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure cert-manager namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ cert_manager_namespace }}"
+
+    - name: Ensure Cloudflare API token Secret exists in cert-manager namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ cloudflare_api_token_secret_name }}"
+            namespace: "{{ cert_manager_namespace }}"
+          type: Opaque
+          stringData:
+            api-token: "{{ cloudflare_api_token_effective }}"
+      no_log: true
+
+    - name: Ensure ClusterIssuer for Cloudflare DNS-01 exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: "{{ cloudflare_cluster_issuer_name }}"
+          spec:
+            acme:
+              email: "{{ acme_email }}"
+              server: "{{ acme_server }}"
+              privateKeySecretRef:
+                name: "{{ cloudflare_cluster_issuer_name }}-account-key"
+              solvers:
+                - dns01:
+                    cloudflare:
+                      apiTokenSecretRef:
+                        name: "{{ cloudflare_api_token_secret_name }}"
+                        key: api-token
+                  selector:
+                    dnsZones:
+                      - "{{ cloudflare_base_domain }}"
+
+    - name: Display ClusterIssuer configuration status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Cloudflare Secret and ClusterIssuer configured successfully!"
+          - "Secret: {{ cloudflare_api_token_secret_name }} in namespace {{ cert_manager_namespace }}"
+          - "ClusterIssuer: {{ cloudflare_cluster_issuer_name }}"
+          - "ACME Server: {{ acme_server }}"
+          - "ACME Email: {{ acme_email }}"
+          - "DNS Zone: {{ cloudflare_base_domain }}"

@@ -1,0 +1,67 @@
+---
+# Ansible playbook to destroy Cloudflare Tunnel (cloudflared) from OKD/Kubernetes
+# Usage: ansible-playbook -i inventory.yml destroy-cloudflared.yml
+
+- name: Destroy Cloudflare Tunnel (cloudflared)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cloudflared_namespace: "{{ lookup('env', 'CLOUDFLARED_NAMESPACE') | default('cloudflared', true) }}"
+    cloudflared_deployment_name: "{{ lookup('env', 'CLOUDFLARED_DEPLOYMENT_NAME') | default('cloudflared', true) }}"
+    cloudflared_secret_name: "{{ lookup('env', 'CLOUDFLARED_SECRET_NAME') | default('tunnel-token', true) }}"
+    cloudflared_pdb_name: "{{ lookup('env', 'CLOUDFLARED_PDB_NAME') | default('cloudflared-availability', true) }}"
+
+  tasks:
+    - name: Remove anyuid SCC from default service account
+      ansible.builtin.command:
+        cmd: oc adm policy remove-scc-from-user anyuid -z default -n {{ cloudflared_namespace }}
+      register: scc_remove
+      changed_when: "'removed' in scc_remove.stdout"
+      failed_when: false
+
+    - name: Delete cloudflared Deployment
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ cloudflared_deployment_name }}"
+        namespace: "{{ cloudflared_namespace }}"
+      failed_when: false
+
+    - name: Delete cloudflared PodDisruptionBudget
+      kubernetes.core.k8s:
+        state: absent
+        api_version: policy/v1
+        kind: PodDisruptionBudget
+        name: "{{ cloudflared_pdb_name }}"
+        namespace: "{{ cloudflared_namespace }}"
+      failed_when: false
+
+    - name: Delete cloudflared Secret
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Secret
+        name: "{{ cloudflared_secret_name }}"
+        namespace: "{{ cloudflared_namespace }}"
+      failed_when: false
+
+    - name: Delete cloudflared namespace
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ cloudflared_namespace }}"
+      failed_when: false
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "Cloudflare Tunnel Destroyed Successfully!"
+          - "============================================"
+          - "Namespace: {{ cloudflared_namespace }}"

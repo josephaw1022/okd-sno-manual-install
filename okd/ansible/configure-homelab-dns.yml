@@ -1,0 +1,56 @@
+---
+# Ansible playbook to configure Homelab wildcard DNS (*.homelab.kubesoar.com) on Pi-hole
+# Usage: ansible-playbook -i inventory.yml configure-homelab-dns.yml
+
+- name: Configure Homelab wildcard DNS on Pi-hole
+  hosts: pihole
+  gather_facts: false
+  vars:
+    pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
+    pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
+    ansible_user: "{{ pihole_ssh_username }}"
+    ansible_password: "{{ pihole_ssh_password }}"
+    dnsmasq_config_file: "homelab.conf"
+    homelab_lb_ip: "{{ lookup('env', 'HOMELAB_LB_IP') | default('192.168.1.230', true) }}"
+    test_domain: "test.homelab.kubesoar.com"
+
+  tasks:
+    - name: Copy Homelab dnsmasq config to Pi-hole
+      ansible.builtin.copy:
+        src: ../dnsmasq/homelab.conf
+        dest: "{{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart pihole-FTL
+
+    - name: Flush handlers to restart pihole-FTL immediately if changed
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify pihole-FTL syntax
+      ansible.builtin.command:
+        cmd: pihole-FTL --test
+      changed_when: false
+      register: ftl_test
+      failed_when: ftl_test.rc != 0
+
+    - name: Verify wildcard DNS resolution on Pi-hole
+      ansible.builtin.command:
+        cmd: "dig +short @127.0.0.1 {{ test_domain }}"
+      register: dig_result
+      changed_when: false
+      failed_when: dig_result.stdout != homelab_lb_ip
+
+    - name: Display confirmation
+      ansible.builtin.debug:
+        msg:
+          - "✅ Homelab wildcard DNS successfully configured on Pi-hole!"
+          - "Config file: {{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+          - "*.homelab.kubesoar.com -> {{ homelab_lb_ip }}"
+          - "Verified resolution: {{ test_domain }} -> {{ dig_result.stdout }}"
+
+  handlers:
+    - name: Restart pihole-FTL
+      ansible.builtin.service:
+        name: pihole-FTL
+        state: restarted

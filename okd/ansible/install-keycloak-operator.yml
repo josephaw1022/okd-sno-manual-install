@@ -1,0 +1,72 @@
+---
+# Ansible playbook to install Keycloak Operator
+# Usage: ansible-playbook -i inventory.yml install-keycloak-operator.yml
+#
+# Reference: https://gist.github.com/josephaw1022/11fad76bc09105f3242149886399bfc8
+
+- name: Install Keycloak Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_k8s_kustomize: >-
+      {{
+        lookup('env', 'KEYCLOAK_K8S_KUSTOMIZE')
+        | default('github.com/keycloak/keycloak-k8s-resources/kubernetes?ref=26.7.0', true)
+      }}
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure keycloak namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+
+    - name: Apply Keycloak Operator manifests via kustomize
+      ansible.builtin.command:
+        cmd: oc apply -k "{{ keycloak_k8s_kustomize }}" -n {{ keycloak_namespace }}
+      register: kustomize_apply
+      changed_when: "'configured' in kustomize_apply.stdout or 'created' in kustomize_apply.stdout"
+
+    - name: Wait for Keycloak Operator deployment to be available
+      ansible.builtin.command:
+        cmd: oc rollout status deployment/keycloak-operator -n {{ keycloak_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Wait for Keycloak CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: keycloaks.k8s.keycloak.org
+      register: keycloak_crd
+      until: keycloak_crd.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Display Keycloak operator installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak Operator installed successfully!"
+          - "Namespace: {{ keycloak_namespace }}"
+          - "Manifest source: {{ keycloak_k8s_kustomize }}"

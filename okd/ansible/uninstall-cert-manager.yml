@@ -1,0 +1,36 @@
+---
+# Ansible playbook to uninstall cert-manager Helm release
+# Usage: ansible-playbook -i inventory.yml uninstall-cert-manager.yml
+
+- name: Uninstall cert-manager via Helm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cert_manager_namespace: "{{ lookup('env', 'CERT_MANAGER_NAMESPACE') | default('cert-manager', true) }}"
+    cert_manager_release_name: "{{ lookup('env', 'CERT_MANAGER_HELM_RELEASE') | default('cert-manager', true) }}"
+
+  tasks:
+    - name: Uninstall cert-manager Helm release
+      ansible.builtin.command:
+        cmd: "helm uninstall {{ cert_manager_release_name }} -n {{ cert_manager_namespace }} --wait --ignore-not-found"
+      changed_when: true
+
+    - name: Remove cert-manager namespace
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ cert_manager_namespace }}"
+
+    - name: Display uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ cert-manager Helm release uninstalled."
+          - "Release: {{ cert_manager_release_name }}"
+          - "Namespace: {{ cert_manager_namespace }}"

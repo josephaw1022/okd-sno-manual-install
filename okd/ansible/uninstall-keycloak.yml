@@ -1,0 +1,61 @@
+---
+# Ansible playbook to uninstall Keycloak and clean up resources
+# Usage: ansible-playbook -i inventory.yml uninstall-keycloak.yml
+
+- name: Uninstall Keycloak
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_name: "{{ lookup('env', 'KEYCLOAK_NAME') | default('keycloak', true) }}"
+    keycloak_postgres_name: "{{ lookup('env', 'KEYCLOAK_POSTGRES_NAME') | default('keycloak-postgres-cluster', true) }}"
+    keycloak_k8s_kustomize: >-
+      {{
+        lookup('env', 'KEYCLOAK_K8S_KUSTOMIZE')
+        | default('github.com/keycloak/keycloak-k8s-resources/kubernetes?ref=26.7.0', true)
+      }}
+
+  tasks:
+    - name: Delete Keycloak CR
+      kubernetes.core.k8s:
+        state: absent
+        api_version: k8s.keycloak.org/v2beta1
+        kind: Keycloak
+        name: "{{ keycloak_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      failed_when: false
+
+    - name: Delete Keycloak Postgres Cluster
+      kubernetes.core.k8s:
+        state: absent
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: "{{ keycloak_postgres_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      failed_when: false
+
+    - name: Delete Keycloak Operator manifests via kustomize
+      ansible.builtin.command:
+        cmd: oc delete -k "{{ keycloak_k8s_kustomize }}" -n {{ keycloak_namespace }} --ignore-not-found
+      failed_when: false
+      changed_when: true
+
+    - name: Delete keycloak namespace
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+      failed_when: false
+
+    - name: Display Keycloak uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak uninstalled successfully."
+          - "Namespace: {{ keycloak_namespace }}"

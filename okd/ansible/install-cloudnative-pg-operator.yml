@@ -87,6 +87,7 @@
         defaultAddCapabilities: []
         requiredDropCapabilities:
           - ALL
+        priority: 15
         fsGroup:
           type: MustRunAs
           ranges:
@@ -99,8 +100,12 @@
           type: MustRunAs
         supplementalGroups:
           type: RunAsAny
-        users: []
-        groups: []
+        seccompProfiles:
+          - "*"
+        users:
+          - "system:serviceaccount:{{ cnpg_namespace }}:{{ cnpg_service_account }}"
+        groups:
+          - system:serviceaccounts
         volumes:
           - configMap
           - downwardAPI

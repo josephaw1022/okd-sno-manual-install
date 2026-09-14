@@ -1,0 +1,153 @@
+---
+# Ansible playbook to deploy CloudNativePG PostgreSQL Cluster for Keycloak
+# Usage: ansible-playbook -i inventory.yml deploy-keycloak-postgres.yml
+#
+# Reference: https://gist.github.com/josephaw1022/11fad76bc09105f3242149886399bfc8
+
+- name: Deploy CloudNativePG PostgreSQL Cluster for Keycloak
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_postgres_name: "{{ lookup('env', 'KEYCLOAK_POSTGRES_NAME') | default('keycloak-postgres-cluster', true) }}"
+    keycloak_postgres_instances: "{{ lookup('env', 'KEYCLOAK_POSTGRES_INSTANCES') | default(3, true) | int }}"
+    keycloak_postgres_database: "{{ lookup('env', 'KEYCLOAK_POSTGRES_DATABASE') | default('keycloak', true) }}"
+    keycloak_postgres_owner: "{{ lookup('env', 'KEYCLOAK_POSTGRES_OWNER') | default('keycloak', true) }}"
+    keycloak_postgres_storage_size: "{{ lookup('env', 'KEYCLOAK_POSTGRES_STORAGE_SIZE') | default('5Gi', true) }}"
+    keycloak_postgres_storage_class: "{{ lookup('env', 'KEYCLOAK_POSTGRES_STORAGE_CLASS') | default('', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure keycloak namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+
+    - name: Ensure keycloak namespace has privileged pod security labels
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+              pod-security.kubernetes.io/audit: privileged
+              pod-security.kubernetes.io/warn: privileged
+
+    - name: Grant anyuid SCC to serviceaccounts in keycloak namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: system:openshift:scc:anyuid
+            namespace: "{{ keycloak_namespace }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:anyuid
+          subjects:
+            - kind: Group
+              name: "system:serviceaccounts:{{ keycloak_namespace }}"
+              apiGroup: rbac.authorization.k8s.io
+
+    - name: Check available storage classes
+      kubernetes.core.k8s_info:
+        kind: StorageClass
+      register: sc_info
+
+    - name: Determine if ephemeral storage should be used
+      ansible.builtin.set_fact:
+        use_ephemeral: "{{ (sc_info.resources | length == 0) and (keycloak_postgres_storage_class | length == 0) }}"
+
+    - name: Check if CNPG app secret already exists
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_postgres_name }}-app"
+        namespace: "{{ keycloak_namespace }}"
+      register: existing_app_secret
+
+    - name: Create CNPG app secret if it does not exist
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ keycloak_postgres_name }}-app"
+            namespace: "{{ keycloak_namespace }}"
+          type: kubernetes.io/basic-auth
+          stringData:
+            username: "{{ keycloak_postgres_owner }}"
+            user: "{{ keycloak_postgres_owner }}"
+            password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+            database: "{{ keycloak_postgres_database }}"
+      when: existing_app_secret.resources | length == 0
+
+    - name: Build CNPG Cluster manifest
+      ansible.builtin.set_fact:
+        cnpg_cluster_manifest: |
+          apiVersion: postgresql.cnpg.io/v1
+          kind: Cluster
+          metadata:
+            name: {{ keycloak_postgres_name }}
+            namespace: {{ keycloak_namespace }}
+          spec:
+            instances: {{ keycloak_postgres_instances | int }}
+            bootstrap:
+              initdb:
+                database: {{ keycloak_postgres_database }}
+                owner: {{ keycloak_postgres_owner }}
+                secret:
+                  name: {{ keycloak_postgres_name }}-app
+            storage:
+              size: {{ keycloak_postgres_storage_size }}
+
+    - name: Apply CloudNativePG Cluster for Keycloak
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ cnpg_cluster_manifest | from_yaml }}"
+
+    - name: Wait for CNPG app secret to be generated
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_postgres_name }}-app"
+        namespace: "{{ keycloak_namespace }}"
+      register: cnpg_secret
+      until: cnpg_secret.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Display Keycloak Postgres deployment status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak Postgres Cluster deployed successfully!"
+          - "Cluster: {{ keycloak_postgres_name }}"
+          - "Namespace: {{ keycloak_namespace }}"
+          - "Database: {{ keycloak_postgres_database }}"
+          - "Secret: {{ keycloak_postgres_name }}-app"
+          - "Ephemeral storage: {{ use_ephemeral }}"
