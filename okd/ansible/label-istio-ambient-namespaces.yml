@@ -17,9 +17,7 @@
     # Safe known namespaces to target if auto-discovery is disabled or as fallback
     istio_ambient_default_namespaces:
       - default
-      - keycloak
       - awx
-      - cloudflared
       - redis-operator
       - strimzi-kafka
       - minio-operator
@@ -42,6 +40,8 @@
       - rabbitmq-system
       - datadog
       - datadog-operator
+      - cloudflared
+      - personal-site
 
   tasks:
     - name: Check if connected to OpenShift
@@ -126,4 +126,4 @@
           - "   - openshift-* (OpenShift core / SDN / OVN / DNS / apiserver)"
           - "   - kube-* (kube-system, kube-public, kube-node-lease)"
           - "   - istio-* (istio-system control plane, istio-ingress gateway)"
-          - "   - metallb-system, cert-manager, kyverno, cnpg-system, kubevirt-hyperconverged, rabbitmq-system, datadog"
+          - "   - metallb-system, cert-manager, kyverno, cnpg-system, kubevirt-hyperconverged, rabbitmq-system, datadog, cloudflared, personal-site"

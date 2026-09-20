@@ -1333,6 +1333,24 @@ ISTIO_AMBIENT_NAMESPACES ?=
 ISTIO_AMBIENT_AUTO_DISCOVER ?= true
 
 
+.PHONY: patch-istio-ovn-routing-via-host enable-istio-ovn-routing-via-host patch-routing-via-host
+patch-istio-ovn-routing-via-host: ## Patch OVN-Kubernetes network operator to enable routingViaHost (required for Istio ambient health probes).
+	@echo "🔧 Patching OVN-Kubernetes gatewayConfig to enable routingViaHost..."
+	@oc patch networks.operator.openshift.io cluster --type=merge -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"routingViaHost": true}}}}}'
+	@echo "✅ OVN-Kubernetes routingViaHost enabled"
+
+enable-istio-ovn-routing-via-host: patch-istio-ovn-routing-via-host
+patch-routing-via-host: patch-istio-ovn-routing-via-host
+
+
+.PHONY: disable-istio-ovn-routing-via-host
+disable-istio-ovn-routing-via-host: ## Disable OVN-Kubernetes routingViaHost.
+	@echo "🔧 Patching OVN-Kubernetes gatewayConfig to disable routingViaHost..."
+	@oc patch networks.operator.openshift.io cluster --type=merge -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"routingViaHost": false}}}}}'
+	@echo "✅ OVN-Kubernetes routingViaHost disabled"
+
+
+
 .PHONY: install-istio-gateway-api-crds
 install-istio-gateway-api-crds: ## Install Gateway API CRDs (latest stable release, 1.5+ when available).
 	@echo "🛣️ Installing Gateway API CRDs..."
@@ -1616,6 +1634,7 @@ disable-istio-ambient-namespaces: unlabel-istio-ambient-namespaces
 .PHONY: install-istio-all
 install-istio-all: ## Install full Istio ambient stack: Gateway API CRDs, base, istiod, cni, ztunnel, ingress, ingress class, Kiali UI, and label ambient namespaces.
 	@echo "🚀 Installing full Istio ambient stack..."
+	@$(MAKE) patch-istio-ovn-routing-via-host
 	@$(MAKE) install-istio-gateway-api-crds
 	@$(MAKE) install-istio-crds
 	@$(MAKE) install-istio
@@ -1892,3 +1911,45 @@ uninstall-keycloak: ## Uninstall Keycloak CR, PostgreSQL cluster, and operator.
 	@echo "✅ Keycloak uninstalled"
 
 destroy-keycloak: uninstall-keycloak
+
+
+##@ Actions Runner Controller (ARC)
+
+ARC_NAMESPACE ?= github-arc
+ARC_HELM_RELEASE ?= arc
+ARC_CHART_VERSION ?= 0.14.2
+
+.PHONY: install-arc-controller install-arc
+install-arc-controller: ## Install Actions Runner Controller (ARC) via Helm.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🚀 Installing Actions Runner Controller (ARC) via Helm..."
+	@pushd ansible > /dev/null && \
+	ARC_NAMESPACE="$(ARC_NAMESPACE)" \
+	ARC_HELM_RELEASE="$(ARC_HELM_RELEASE)" \
+	ARC_CHART_VERSION="$(ARC_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-arc-controller.yml && \
+	popd > /dev/null
+	@echo "✅ Actions Runner Controller (ARC) installed"
+
+install-arc: install-arc-controller
+
+
+.PHONY: uninstall-arc-controller uninstall-arc
+uninstall-arc-controller: ## Uninstall Actions Runner Controller (ARC) Helm release and namespace.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Actions Runner Controller (ARC) Helm release..."
+	@pushd ansible > /dev/null && \
+	ARC_NAMESPACE="$(ARC_NAMESPACE)" \
+	ARC_HELM_RELEASE="$(ARC_HELM_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-arc-controller.yml && \
+	popd > /dev/null
+	@echo "✅ Actions Runner Controller (ARC) uninstall complete"
+
+uninstall-arc: uninstall-arc-controller
+

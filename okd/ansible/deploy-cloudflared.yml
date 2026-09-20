@@ -58,8 +58,6 @@
           kind: Namespace
           metadata:
             name: "{{ cloudflared_namespace }}"
-            labels:
-              istio.io/dataplane-mode: ambient
 
     - name: Grant anyuid SCC to default service account
       ansible.builtin.command:

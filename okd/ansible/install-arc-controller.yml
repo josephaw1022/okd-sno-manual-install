@@ -1,0 +1,95 @@
+---
+# Ansible playbook to install actions-runner-controller via Helm on OpenShift/OKD
+# Usage: ansible-playbook -i inventory.yml install-arc-controller.yml
+
+- name: Install Actions Runner Controller (ARC) via Helm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    arc_namespace: "{{ lookup('env', 'ARC_NAMESPACE') | default('github-arc', true) }}"
+    arc_helm_release_name: "{{ lookup('env', 'ARC_HELM_RELEASE') | default('arc', true) }}"
+    arc_chart_version: "{{ lookup('env', 'ARC_CHART_VERSION') | default('0.14.2', true) }}"
+    arc_chart_oci: "oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure ARC controller namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ arc_namespace }}"
+
+    - name: Build Helm command for ARC controller install
+      ansible.builtin.set_fact:
+        arc_helm_cmd: >-
+          helm upgrade --install {{ arc_helm_release_name }} {{ arc_chart_oci }}
+          --namespace {{ arc_namespace }}
+          --create-namespace
+          --wait
+          --timeout 10m
+          {{ ('--version ' ~ arc_chart_version) if (arc_chart_version | length > 0) else '' }}
+
+    - name: Install or upgrade Actions Runner Controller Helm release
+      ansible.builtin.command:
+        cmd: "{{ arc_helm_cmd }}"
+      register: arc_install
+      changed_when: "'STATUS: deployed' in arc_install.stdout or 'STATUS: pending-upgrade' in arc_install.stdout"
+
+    - name: Wait for ARC controller deployment
+      ansible.builtin.command:
+        cmd: oc rollout status deployment/{{ arc_helm_release_name }}-gha-rs-controller -n {{ arc_namespace }} --timeout=300s
+      changed_when: false
+
+    - name: Wait for ARC AutoscalingRunnerSet CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: autoscalingrunnersets.actions.github.com
+      register: arc_autoscalingrunnerset_crd
+      until: arc_autoscalingrunnerset_crd.resources | length > 0
+      retries: 60
+      delay: 5
+
+    - name: Wait for ARC EphemeralRunnerSet CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: ephemeralrunnersets.actions.github.com
+      register: arc_ephemeralrunnerset_crd
+      until: arc_ephemeralrunnerset_crd.resources | length > 0
+      retries: 60
+      delay: 5
+
+    - name: Display ARC controller installation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Actions Runner Controller (ARC) Helm release installed successfully!"
+          - ""
+          - "📋 Release: {{ arc_helm_release_name }}"
+          - "📋 Namespace: {{ arc_namespace }}"
+          - "📋 Chart Version: {{ arc_chart_version }}"

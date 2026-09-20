@@ -1,0 +1,36 @@
+---
+# Ansible playbook to uninstall Actions Runner Controller (ARC) Helm release
+# Usage: ansible-playbook -i inventory.yml uninstall-arc-controller.yml
+
+- name: Uninstall Actions Runner Controller (ARC) via Helm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    arc_namespace: "{{ lookup('env', 'ARC_NAMESPACE') | default('github-arc', true) }}"
+    arc_helm_release_name: "{{ lookup('env', 'ARC_HELM_RELEASE') | default('arc', true) }}"
+
+  tasks:
+    - name: Uninstall ARC Helm release
+      ansible.builtin.command:
+        cmd: "helm uninstall {{ arc_helm_release_name }} -n {{ arc_namespace }} --wait --ignore-not-found"
+      changed_when: true
+
+    - name: Remove ARC namespace
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ arc_namespace }}"
+
+    - name: Display uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Actions Runner Controller (ARC) Helm release uninstalled."
+          - "Release: {{ arc_helm_release_name }}"
+          - "Namespace: {{ arc_namespace }}"
