@@ -1,0 +1,241 @@
+---
+# Ansible playbook to install Kiali UI for Istio via Helm on OpenShift
+# Usage: ansible-playbook -i inventory.yml install-istio-kiali.yml
+
+- name: Install Kiali UI for Istio
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    kiali_namespace: "{{ lookup('env', 'KIALI_NAMESPACE') | default('istio-system', true) }}"
+    kiali_repo_name: "{{ lookup('env', 'KIALI_HELM_REPO_NAME') | default('kiali', true) }}"
+    kiali_repo_url: "{{ lookup('env', 'KIALI_HELM_REPO_URL') | default('https://kiali.org/helm-charts', true) }}"
+    kiali_release: "{{ lookup('env', 'KIALI_RELEASE') | default('kiali', true) }}"
+    kiali_chart_version: "{{ lookup('env', 'KIALI_CHART_VERSION') | default('', true) }}"
+    kiali_hostname: "{{ lookup('env', 'KIALI_HOSTNAME') | default('kiali.apps.okd.kubesoar.com', true) }}"
+    kiali_ingress_class: "{{ lookup('env', 'KIALI_INGRESS_CLASS') | default('istio', true) }}"
+    kiali_tls_secret: "{{ lookup('env', 'KIALI_TLS_SECRET') | default('kiali-tls', true) }}"
+    kiali_cluster_issuer: "{{ lookup('env', 'KIALI_CLUSTER_ISSUER') | default('cloudflare-dns01', true) }}"
+    kiali_auth_strategy: "{{ lookup('env', 'KIALI_AUTH_STRATEGY') | default('openshift', true) }}"
+    kiali_prometheus_url: "{{ lookup('env', 'KIALI_PROMETHEUS_URL') | default('https://thanos-querier.openshift-monitoring.svc:9091', true) }}"
+    istio_namespace: "{{ lookup('env', 'ISTIO_NAMESPACE') | default('istio-system', true) }}"
+    istio_ingress_namespace: "{{ lookup('env', 'ISTIO_INGRESS_NAMESPACE') | default('istio-ingress', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Kiali namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ kiali_namespace }}"
+
+    - name: Ensure Kiali Helm repo is configured
+      ansible.builtin.command:
+        cmd: helm repo add {{ kiali_repo_name }} {{ kiali_repo_url }}
+      register: kiali_repo_add
+      changed_when: "'has been added' in kiali_repo_add.stdout"
+      failed_when: false
+
+    - name: Update Kiali Helm repo
+      ansible.builtin.command:
+        cmd: helm repo update {{ kiali_repo_name }}
+      changed_when: false
+
+    - name: Grant cluster-monitoring-view role to Kiali service account
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ kiali_release }}-monitoring-rbac"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-monitoring-view
+          subjects:
+            - kind: ServiceAccount
+              name: kiali
+              namespace: "{{ kiali_namespace }}"
+
+    - name: Write temporary values file for Kiali Helm chart
+      ansible.builtin.copy:
+        dest: "/tmp/kiali-values-{{ kiali_release }}.yaml"
+        mode: '0600'
+        content: |
+          kiali_route_url: "https://{{ kiali_hostname }}"
+
+          auth:
+            strategy: "{{ kiali_auth_strategy }}"
+            openshift:
+              redirect_uris:
+                - "https://{{ kiali_hostname }}/api/auth/callback"
+                - "https://{{ kiali_hostname }}:443/api/auth/callback"
+
+          server:
+            web_fqdn: "{{ kiali_hostname }}"
+            web_schema: "https"
+            web_port: 443
+            web_root: ""
+
+          identity:
+            cert_file: ""
+            private_key_file: ""
+
+          deployment:
+            ingress:
+              override_yaml:
+                spec:
+                  host: "{{ kiali_hostname }}"
+                  port:
+                    targetPort: 20001
+                  tls:
+                    insecureEdgeTerminationPolicy: Redirect
+                    termination: edge
+                  to:
+                    kind: Service
+                    name: kiali
+
+          external_services:
+            istio:
+              root_namespace: "{{ istio_namespace }}"
+            prometheus:
+              url: "{{ kiali_prometheus_url }}"
+              thanos_proxy:
+                enabled: true
+              auth:
+                type: "bearer"
+                use_kiali_token: true
+                insecure_skip_verify: true
+
+    - name: Install or upgrade Kiali Helm release
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install {{ kiali_release }} {{ kiali_repo_name }}/kiali-server
+          --namespace {{ kiali_namespace }}
+          --values /tmp/kiali-values-{{ kiali_release }}.yaml
+          --wait
+          --timeout 10m
+          {{ ('--version ' ~ kiali_chart_version) if (kiali_chart_version | length > 0) else '' }}
+      register: kiali_install
+      changed_when: "'STATUS: deployed' in kiali_install.stdout or 'STATUS: pending-upgrade' in kiali_install.stdout"
+
+    - name: Clean up temporary values file
+      ansible.builtin.file:
+        path: "/tmp/kiali-values-{{ kiali_release }}.yaml"
+        state: absent
+
+    - name: Deploy Ingress resource for Kiali on Istio Ingress Gateway
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: "{{ kiali_release }}-ingress"
+            namespace: "{{ kiali_namespace }}"
+            annotations:
+              cert-manager.io/cluster-issuer: "{{ kiali_cluster_issuer }}"
+              external-dns.alpha.kubernetes.io/hostname: "{{ kiali_hostname }}"
+          spec:
+            ingressClassName: "{{ kiali_ingress_class }}"
+            rules:
+              - host: "{{ kiali_hostname }}"
+                http:
+                  paths:
+                    - path: /
+                      pathType: ImplementationSpecific
+                      backend:
+                        service:
+                          name: kiali
+                          port:
+                            number: 20001
+            tls:
+              - hosts:
+                  - "{{ kiali_hostname }}"
+                secretName: "{{ kiali_tls_secret }}"
+
+    - name: Wait for Kiali TLS Secret to be issued by cert-manager
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ kiali_tls_secret }}"
+        namespace: "{{ kiali_namespace }}"
+      register: tls_sec_info
+      until: tls_sec_info.resources is defined and tls_sec_info.resources | length > 0
+      retries: 40
+      delay: 5
+      failed_when: false
+
+    - name: Sync TLS Secret to istio-ingress namespace
+      when: kiali_ingress_class == 'istio' and tls_sec_info.resources is defined and tls_sec_info.resources | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ kiali_tls_secret }}"
+            namespace: "{{ istio_ingress_namespace }}"
+          type: kubernetes.io/tls
+          data: "{{ tls_sec_info.resources[0].data }}"
+
+    - name: Create OpenShift ConsoleLink for Kiali
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: console.openshift.io/v1
+          kind: ConsoleLink
+          metadata:
+            name: kiali
+          spec:
+            applicationMenu:
+              section: Observability
+            href: "https://{{ kiali_hostname }}"
+            location: ApplicationMenu
+            text: "Kiali (Istio Mesh UI)"
+      failed_when: false
+
+    - name: Wait for Kiali deployment to be available
+      ansible.builtin.command:
+        cmd: oc rollout status deployment/kiali -n {{ kiali_namespace }} --timeout=120s
+      register: rollout_status
+      until: rollout_status.rc == 0
+      retries: 5
+      delay: 5
+      changed_when: false
+
+    - name: Display Kiali install status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Kiali UI for Istio installed successfully."
+          - "Release: {{ kiali_release }}"
+          - "Namespace: {{ kiali_namespace }}"
+          - "Hostname: https://{{ kiali_hostname }}"
+          - "Auth Strategy: {{ kiali_auth_strategy }}"
+          - "Ingress Class: {{ kiali_ingress_class }}"
+          - "TLS Secret: {{ kiali_tls_secret }}"
+          - "Prometheus: {{ kiali_prometheus_url }}"

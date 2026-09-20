@@ -45,6 +45,8 @@
           kind: Namespace
           metadata:
             name: "{{ stolostron_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
 
     - name: Create OperatorGroup for Stolostron
       kubernetes.core.k8s:

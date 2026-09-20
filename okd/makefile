@@ -1313,10 +1313,24 @@ ISTIOD_RELEASE ?= istiod
 ISTIO_CNI_RELEASE ?= istio-cni
 ISTIO_ZTUNNEL_RELEASE ?= ztunnel
 ISTIO_INGRESS_RELEASE ?= istio-ingress
+ISTIO_INGRESS_NAMESPACE ?= istio-ingress
 ISTIO_INGRESS_CLASS_NAME ?= istio
 ISTIO_INGRESS_LOADBALANCER_IP ?= 192.168.1.230
 ISTIO_CHART_VERSION ?=
 GATEWAY_API_CRDS_URL ?= https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml
+KIALI_NAMESPACE ?= istio-system
+KIALI_HELM_REPO_NAME ?= kiali
+KIALI_HELM_REPO_URL ?= https://kiali.org/helm-charts
+KIALI_RELEASE ?= kiali
+KIALI_CHART_VERSION ?=
+KIALI_HOSTNAME ?= kiali.apps.$(CLUSTER_NAME).$(BASE_DOMAIN)
+KIALI_INGRESS_CLASS ?= $(ISTIO_INGRESS_CLASS_NAME)
+KIALI_TLS_SECRET ?= kiali-tls
+KIALI_CLUSTER_ISSUER ?= cloudflare-dns01
+KIALI_AUTH_STRATEGY ?= openshift
+KIALI_PROMETHEUS_URL ?= https://thanos-querier.openshift-monitoring.svc:9091
+ISTIO_AMBIENT_NAMESPACES ?=
+ISTIO_AMBIENT_AUTO_DISCOVER ?= true
 
 
 .PHONY: install-istio-gateway-api-crds
@@ -1525,8 +1539,82 @@ uninstall-istio-ingress-class: ## Uninstall IngressClass resource for Istio ingr
 	@echo "✅ Istio ingress class uninstall requested"
 
 
+.PHONY: install-istio-kiali install-kiali deploy-kiali
+install-istio-kiali: ## Install Kiali UI for Istio via Helm on OpenShift.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "📊 Installing Kiali UI for Istio at $(KIALI_HOSTNAME)..."
+	@pushd ansible > /dev/null && \
+	KIALI_NAMESPACE="$(KIALI_NAMESPACE)" \
+	KIALI_HELM_REPO_NAME="$(KIALI_HELM_REPO_NAME)" \
+	KIALI_HELM_REPO_URL="$(KIALI_HELM_REPO_URL)" \
+	KIALI_RELEASE="$(KIALI_RELEASE)" \
+	KIALI_CHART_VERSION="$(KIALI_CHART_VERSION)" \
+	KIALI_HOSTNAME="$(KIALI_HOSTNAME)" \
+	KIALI_INGRESS_CLASS="$(KIALI_INGRESS_CLASS)" \
+	KIALI_TLS_SECRET="$(KIALI_TLS_SECRET)" \
+	KIALI_CLUSTER_ISSUER="$(KIALI_CLUSTER_ISSUER)" \
+	KIALI_AUTH_STRATEGY="$(KIALI_AUTH_STRATEGY)" \
+	KIALI_PROMETHEUS_URL="$(KIALI_PROMETHEUS_URL)" \
+	ISTIO_NAMESPACE="$(ISTIO_NAMESPACE)" \
+	ISTIO_INGRESS_NAMESPACE="$(ISTIO_INGRESS_NAMESPACE)" \
+	ansible-playbook -i inventory.yml install-istio-kiali.yml && \
+	popd > /dev/null
+	@echo "✅ Kiali UI for Istio installed"
+
+install-kiali: install-istio-kiali
+deploy-kiali: install-istio-kiali
+
+
+.PHONY: uninstall-istio-kiali uninstall-kiali destroy-kiali
+uninstall-istio-kiali: ## Uninstall Kiali UI for Istio Helm release and ingress resources.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Kiali UI for Istio..."
+	@pushd ansible > /dev/null && \
+	KIALI_NAMESPACE="$(KIALI_NAMESPACE)" \
+	KIALI_RELEASE="$(KIALI_RELEASE)" \
+	KIALI_TLS_SECRET="$(KIALI_TLS_SECRET)" \
+	ISTIO_INGRESS_NAMESPACE="$(ISTIO_INGRESS_NAMESPACE)" \
+	ansible-playbook -i inventory.yml uninstall-istio-kiali.yml && \
+	popd > /dev/null
+	@echo "✅ Kiali UI for Istio uninstall complete"
+
+uninstall-kiali: uninstall-istio-kiali
+destroy-kiali: uninstall-istio-kiali
+
+
+.PHONY: label-istio-ambient-namespaces enable-istio-ambient-namespaces
+label-istio-ambient-namespaces: ## Label eligible application namespaces for Istio ambient mesh (istio.io/dataplane-mode=ambient).
+	@echo "🏷️ Labeling eligible namespaces for Istio ambient mesh..."
+	@pushd ansible > /dev/null && \
+	ISTIO_AMBIENT_NAMESPACES="$(ISTIO_AMBIENT_NAMESPACES)" \
+	ISTIO_AMBIENT_AUTO_DISCOVER="$(ISTIO_AMBIENT_AUTO_DISCOVER)" \
+	ansible-playbook -i inventory.yml label-istio-ambient-namespaces.yml && \
+	popd > /dev/null
+	@echo "✅ Ambient mesh namespace labeling complete"
+
+enable-istio-ambient-namespaces: label-istio-ambient-namespaces
+
+
+.PHONY: unlabel-istio-ambient-namespaces disable-istio-ambient-namespaces
+unlabel-istio-ambient-namespaces: ## Remove Istio ambient mesh label from namespaces.
+	@echo "🏷️ Removing Istio ambient mesh label from namespaces..."
+	@pushd ansible > /dev/null && \
+	ISTIO_AMBIENT_NAMESPACES="$(ISTIO_AMBIENT_NAMESPACES)" \
+	ansible-playbook -i inventory.yml unlabel-istio-ambient-namespaces.yml && \
+	popd > /dev/null
+	@echo "✅ Ambient mesh namespace unlabeling complete"
+
+disable-istio-ambient-namespaces: unlabel-istio-ambient-namespaces
+
+
 .PHONY: install-istio-all
-install-istio-all: ## Install full Istio ambient stack: Gateway API CRDs, base, istiod, cni, ztunnel, ingress, ingress class.
+install-istio-all: ## Install full Istio ambient stack: Gateway API CRDs, base, istiod, cni, ztunnel, ingress, ingress class, Kiali UI, and label ambient namespaces.
 	@echo "🚀 Installing full Istio ambient stack..."
 	@$(MAKE) install-istio-gateway-api-crds
 	@$(MAKE) install-istio-crds
@@ -1535,12 +1623,16 @@ install-istio-all: ## Install full Istio ambient stack: Gateway API CRDs, base, 
 	@$(MAKE) install-istio-ztunnel
 	@$(MAKE) install-istio-ingress
 	@$(MAKE) install-istio-ingress-class
+	@$(MAKE) install-istio-kiali
+	@$(MAKE) label-istio-ambient-namespaces
 	@echo "✅ Full Istio ambient stack installation complete"
 
 
 .PHONY: uninstall-istio-all
-uninstall-istio-all: ## Uninstall full Istio ambient stack in reverse order.
+uninstall-istio-all: ## Uninstall full Istio ambient stack in reverse order and unlabel ambient namespaces.
 	@echo "↩️ Uninstalling full Istio ambient stack..."
+	@$(MAKE) unlabel-istio-ambient-namespaces
+	@$(MAKE) uninstall-istio-kiali
 	@$(MAKE) uninstall-istio-ingress-class
 	@$(MAKE) uninstall-istio-ingress
 	@$(MAKE) uninstall-istio-ztunnel
@@ -1686,6 +1778,11 @@ KEYCLOAK_POSTGRES_INSTANCES ?= 3
 KEYCLOAK_POSTGRES_STORAGE_SIZE ?= 5Gi
 KEYCLOAK_POSTGRES_STORAGE_CLASS ?=
 KEYCLOAK_K8S_KUSTOMIZE ?= github.com/keycloak/keycloak-k8s-resources/kubernetes?ref=26.7.0
+KEYCLOAK_REALM ?= master
+KEYCLOAK_ENTRAID_APP_NAME ?= Keycloak-Master-Realm-OAuth
+KEYCLOAK_ENTRAID_SECRET_NAME ?= keycloak-entraid-secret
+KEYCLOAK_IDP_ALIAS ?= azure
+KEYCLOAK_IDP_DISPLAY_NAME ?= Microsoft Entra ID
 
 
 .PHONY: install-keycloak-operator
@@ -1716,8 +1813,36 @@ deploy-keycloak-postgres: ## Deploy CloudNativePG PostgreSQL Cluster for Keycloa
 deploy-keycloak-db: deploy-keycloak-postgres
 
 
-.PHONY: deploy-keycloak
-deploy-keycloak: ## Deploy Keycloak Custom Resource (Istio ingress, cert-manager TLS, CNPG DB).
+.PHONY: setup-keycloak-entraid create-keycloak-entraid-app configure-keycloak-entraid
+setup-keycloak-entraid: ## Configure Microsoft Entra ID (Azure AD) OAuth/OIDC for Keycloak master realm.
+	@echo "🔐 Setting up Entra ID OAuth for Keycloak master realm..."
+	@pushd ansible > /dev/null && \
+	TENANT=$${AZURE_TENANT_ID:-$$(az account show --query tenantId -o tsv 2>/dev/null)}; \
+	SUB=$${AZURE_SUBSCRIPTION_ID:-$$(az account show --query id -o tsv 2>/dev/null)}; \
+	if [ -z "$$TENANT" ] || [ -z "$$SUB" ]; then \
+		echo "❌ Azure credentials not found. Run 'az login' first."; \
+		exit 1; \
+	fi; \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_REALM="$(KEYCLOAK_REALM)" \
+	KEYCLOAK_ENTRAID_APP_NAME="$(KEYCLOAK_ENTRAID_APP_NAME)" \
+	KEYCLOAK_ENTRAID_SECRET_NAME="$(KEYCLOAK_ENTRAID_SECRET_NAME)" \
+	KEYCLOAK_IDP_ALIAS="$(KEYCLOAK_IDP_ALIAS)" \
+	KEYCLOAK_IDP_DISPLAY_NAME="$(KEYCLOAK_IDP_DISPLAY_NAME)" \
+	ansible-playbook -i inventory.yml setup-keycloak-entraid.yml \
+		-e "azure_tenant_id=$$TENANT" \
+		-e "azure_subscription_id=$$SUB" && \
+	popd > /dev/null
+	@echo "✅ Entra ID OAuth configured for Keycloak master realm"
+
+create-keycloak-entraid-app: setup-keycloak-entraid ## Alias for setup-keycloak-entraid.
+configure-keycloak-entraid: setup-keycloak-entraid ## Alias for setup-keycloak-entraid.
+
+
+.PHONY: deploy-keycloak create-keycloak
+deploy-keycloak: ## Deploy Keycloak Custom Resource (Istio ingress, cert-manager TLS, CNPG DB, and Entra ID IdP).
 	@echo "👑 Deploying Keycloak CR ($(KEYCLOAK_NAME)) at $(KEYCLOAK_HOSTNAME)..."
 	@pushd ansible > /dev/null && \
 	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
@@ -1731,9 +1856,15 @@ deploy-keycloak: ## Deploy Keycloak Custom Resource (Istio ingress, cert-manager
 	KEYCLOAK_DB_PORT="$(KEYCLOAK_DB_PORT)" \
 	KEYCLOAK_DB_NAME="$(KEYCLOAK_DB_NAME)" \
 	KEYCLOAK_DB_SECRET_NAME="$(KEYCLOAK_DB_SECRET_NAME)" \
+	KEYCLOAK_REALM="$(KEYCLOAK_REALM)" \
+	KEYCLOAK_ENTRAID_SECRET_NAME="$(KEYCLOAK_ENTRAID_SECRET_NAME)" \
+	KEYCLOAK_IDP_ALIAS="$(KEYCLOAK_IDP_ALIAS)" \
+	KEYCLOAK_IDP_DISPLAY_NAME="$(KEYCLOAK_IDP_DISPLAY_NAME)" \
 	ansible-playbook -i inventory.yml deploy-keycloak.yml && \
 	popd > /dev/null
 	@echo "✅ Keycloak CR deployed"
+
+create-keycloak: deploy-keycloak ## Create and deploy Keycloak CR (alias for deploy-keycloak).
 
 
 .PHONY: install-keycloak setup-keycloak
@@ -1741,6 +1872,11 @@ install-keycloak: install-keycloak-operator deploy-keycloak-postgres deploy-keyc
 	@echo "🎉 Keycloak complete setup finished"
 
 setup-keycloak: install-keycloak
+
+
+.PHONY: setup-keycloak-all install-keycloak-all
+setup-keycloak-all: setup-keycloak-entraid install-keycloak ## Complete Keycloak setup including Entra ID app registration, operator, database, and Keycloak CR.
+install-keycloak-all: setup-keycloak-all
 
 
 .PHONY: uninstall-keycloak destroy-keycloak

@@ -44,6 +44,8 @@
           kind: Namespace
           metadata:
             name: "{{ strimzi_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
 
     - name: Ensure OperatorGroup for Strimzi exists
       kubernetes.core.k8s:

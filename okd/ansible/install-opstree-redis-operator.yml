@@ -44,6 +44,8 @@
           kind: Namespace
           metadata:
             name: "{{ redis_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
 
     - name: Ensure OperatorGroup for Redis operator exists
       kubernetes.core.k8s:

@@ -95,6 +95,8 @@
           kind: Namespace
           metadata:
             name: "{{ awx_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
 
     - name: Compose base Helm argv for AWX operator install
       ansible.builtin.set_fact:

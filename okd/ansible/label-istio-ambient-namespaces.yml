@@ -1,0 +1,129 @@
+---
+# Ansible playbook to label eligible namespaces for Istio ambient mesh
+# Usage: ansible-playbook -i inventory.yml label-istio-ambient-namespaces.yml
+
+- name: Label namespaces for Istio ambient mesh
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    # Explicit namespace list or auto-discovery
+    istio_ambient_auto_discover: "{{ lookup('env', 'ISTIO_AMBIENT_AUTO_DISCOVER') | default('true', true) | bool }}"
+    istio_ambient_namespaces_env: "{{ lookup('env', 'ISTIO_AMBIENT_NAMESPACES') | default('', true) }}"
+
+    # Safe known namespaces to target if auto-discovery is disabled or as fallback
+    istio_ambient_default_namespaces:
+      - default
+      - keycloak
+      - awx
+      - cloudflared
+      - redis-operator
+      - strimzi-kafka
+      - minio-operator
+      - open-cluster-management
+
+    # System and infrastructure namespaces that MUST NEVER be enrolled into ambient mesh to prevent cluster disruption
+    istio_ambient_excluded_namespaces:
+      - default-broken # placeholder if needed
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - istio-system
+      - istio-ingress
+      - istio-cni
+      - metallb-system
+      - cert-manager
+      - kyverno
+      - cnpg-system
+      - kubevirt-hyperconverged
+      - rabbitmq-system
+      - datadog
+      - datadog-operator
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Get all namespaces if auto-discover is enabled
+      kubernetes.core.k8s_info:
+        kind: Namespace
+      register: all_cluster_namespaces
+      when: istio_ambient_auto_discover and (istio_ambient_namespaces_env | length == 0)
+
+    - name: Determine candidate namespaces from auto-discovery
+      ansible.builtin.set_fact:
+        candidate_namespaces: >-
+          {{
+            all_cluster_namespaces.resources
+            | map(attribute='metadata.name')
+            | reject('match', '^openshift(-.*)?$')
+            | reject('match', '^kube(-.*)?$')
+            | reject('match', '^istio(-.*)?$')
+            | reject('in', istio_ambient_excluded_namespaces)
+            | list
+          }}
+      when: istio_ambient_auto_discover and (istio_ambient_namespaces_env | length == 0)
+
+    - name: Determine candidate namespaces from environment or default list
+      ansible.builtin.set_fact:
+        candidate_namespaces: >-
+          {{
+            (istio_ambient_namespaces_env | length > 0)
+            | ternary(istio_ambient_namespaces_env.split(','), istio_ambient_default_namespaces)
+            | map('trim')
+            | reject('match', '^openshift(-.*)?$')
+            | reject('match', '^kube(-.*)?$')
+            | reject('match', '^istio(-.*)?$')
+            | reject('in', istio_ambient_excluded_namespaces)
+            | list
+          }}
+      when: not istio_ambient_auto_discover or (istio_ambient_namespaces_env | length > 0)
+
+    - name: Filter candidate namespaces to only those existing on cluster
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: "{{ item }}"
+      loop: "{{ candidate_namespaces }}"
+      register: existing_ns_info
+
+    - name: Build list of existing target namespaces
+      ansible.builtin.set_fact:
+        target_namespaces: "{{ existing_ns_info.results | selectattr('resources', 'defined') | selectattr('resources', 'truthy') | map(attribute='item') | list }}"
+
+    - name: Apply ambient mesh label to target namespaces
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ item }}"
+            labels:
+              istio.io/dataplane-mode: ambient
+      loop: "{{ target_namespaces }}"
+      register: ns_label_results
+
+    - name: Display labeled namespaces summary
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio ambient mesh data plane enabled (istio.io/dataplane-mode=ambient) for namespaces:"
+          - "{{ target_namespaces }}"
+          - "🔒 System and infrastructure namespaces preserved without ambient proxying:"
+          - "   - openshift-* (OpenShift core / SDN / OVN / DNS / apiserver)"
+          - "   - kube-* (kube-system, kube-public, kube-node-lease)"
+          - "   - istio-* (istio-system control plane, istio-ingress gateway)"
+          - "   - metallb-system, cert-manager, kyverno, cnpg-system, kubevirt-hyperconverged, rabbitmq-system, datadog"

@@ -1,0 +1,103 @@
+---
+# Ansible playbook to uninstall Kiali UI for Istio
+# Usage: ansible-playbook -i inventory.yml uninstall-istio-kiali.yml
+
+- name: Uninstall Kiali UI for Istio
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    kiali_namespace: "{{ lookup('env', 'KIALI_NAMESPACE') | default('istio-system', true) }}"
+    kiali_release: "{{ lookup('env', 'KIALI_RELEASE') | default('kiali', true) }}"
+    kiali_tls_secret: "{{ lookup('env', 'KIALI_TLS_SECRET') | default('kiali-tls', true) }}"
+    istio_ingress_namespace: "{{ lookup('env', 'ISTIO_INGRESS_NAMESPACE') | default('istio-ingress', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Remove OpenShift ConsoleLink for Kiali
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: console.openshift.io/v1
+          kind: ConsoleLink
+          metadata:
+            name: kiali
+      failed_when: false
+
+    - name: Remove Kiali Ingress resource
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: "{{ kiali_release }}-ingress"
+            namespace: "{{ kiali_namespace }}"
+      failed_when: false
+
+    - name: Remove synced TLS Secret from istio-ingress namespace
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ kiali_tls_secret }}"
+            namespace: "{{ istio_ingress_namespace }}"
+      failed_when: false
+
+    - name: Remove Kiali Certificate and TLS Secret in namespace
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: "{{ kiali_tls_secret }}"
+            namespace: "{{ kiali_namespace }}"
+      failed_when: false
+
+    - name: Remove Kiali monitoring ClusterRoleBinding
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ kiali_release }}-monitoring-rbac"
+      failed_when: false
+
+    - name: Uninstall Kiali Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall {{ kiali_release }}
+          --namespace {{ kiali_namespace }}
+          --wait
+          --timeout 10m
+          --ignore-not-found
+      register: kiali_uninstall
+      changed_when: "'uninstalled' in kiali_uninstall.stdout | lower"
+
+    - name: Remove Kiali OAuthClient if still present
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: oauth.openshift.io/v1
+          kind: OAuthClient
+          metadata:
+            name: "{{ kiali_release }}-{{ kiali_namespace }}"
+      failed_when: false
+
+    - name: Display Kiali uninstall status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Kiali UI for Istio uninstall complete."
+          - "Release: {{ kiali_release }}"
+          - "Namespace: {{ kiali_namespace }}"

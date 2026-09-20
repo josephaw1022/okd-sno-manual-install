@@ -1,0 +1,349 @@
+---
+# Tasks to configure Microsoft Entra ID Identity Provider in Keycloak master realm
+# This file is included by both setup-keycloak-entraid.yml and deploy-keycloak.yml
+
+- name: Get Entra ID secret from Kubernetes
+  kubernetes.core.k8s_info:
+    kind: Secret
+    name: "{{ keycloak_entraid_secret_name }}"
+    namespace: "{{ keycloak_namespace }}"
+  register: entraid_sec_res
+  failed_when: false
+
+- name: Skip Keycloak IdP configuration if secret not found
+  ansible.builtin.debug:
+    msg: "⚠️ Entra ID secret '{{ keycloak_entraid_secret_name }}' not found in namespace '{{ keycloak_namespace }}'. Skipping IdP configuration."
+  when: entraid_sec_res.resources is not defined or entraid_sec_res.resources | length == 0
+
+- name: Configure Keycloak Entra ID Identity Provider block
+  when: entraid_sec_res.resources is defined and entraid_sec_res.resources | length > 0
+  block:
+    - name: Extract Entra ID credentials from secret
+      ansible.builtin.set_fact:
+        kc_entraid_client_id: "{{ (entraid_sec_res.resources[0].data['client-id'] | default(entraid_sec_res.resources[0].data['clientId'], true)) | b64decode }}"
+        kc_entraid_client_secret: "{{ (entraid_sec_res.resources[0].data['client-secret'] | default(entraid_sec_res.resources[0].data['clientSecret'], true)) | b64decode }}"
+        kc_entraid_tenant_id: "{{ (entraid_sec_res.resources[0].data['tenant-id'] | default(entraid_sec_res.resources[0].data['tenantId'], true)) | b64decode }}"
+      no_log: true
+
+    - name: Wait for Keycloak workload rollout to complete
+      ansible.builtin.command:
+        cmd: "oc rollout status statefulset/{{ keycloak_name }} -n {{ keycloak_namespace }} --timeout=300s"
+      register: kc_rollout
+      changed_when: false
+      failed_when: false
+
+    - name: Get Keycloak initial admin secret
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_name }}-initial-admin"
+        namespace: "{{ keycloak_namespace }}"
+      register: kc_admin_sec
+      until: kc_admin_sec.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Extract Keycloak admin credentials
+      ansible.builtin.set_fact:
+        kc_admin_user: "{{ (kc_admin_sec.resources[0].data.username | b64decode) if kc_admin_sec.resources[0].data.username is defined else 'admin' }}"
+        kc_admin_pass: "{{ kc_admin_sec.resources[0].data.password | b64decode }}"
+      no_log: true
+
+    - name: Wait for Keycloak master realm endpoint to be available
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/realms/master"
+        method: GET
+        validate_certs: false
+        status_code: 200
+      register: kc_health_check
+      until: kc_health_check.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Authenticate against Keycloak Admin API
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: admin-cli
+          grant_type: password
+          username: "{{ kc_admin_user }}"
+          password: "{{ kc_admin_pass }}"
+        validate_certs: false
+        status_code: [200, 400, 401, 403, 500]
+      register: kc_token_response
+
+    - name: Fail if token authentication was unsuccessful
+      ansible.builtin.fail:
+        msg: |
+          Failed to authenticate to Keycloak Admin API!
+          Status: {{ kc_token_response.status }}
+          Response: {{ kc_token_response.json | default(kc_token_response.content | default('none')) }}
+      when: kc_token_response.status != 200
+
+    - name: Check if Entra ID Identity Provider already exists in realm {{ keycloak_realm }}
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+        validate_certs: false
+        status_code: [200, 404]
+      register: existing_kc_idp
+
+    - name: Define Entra ID Identity Provider payload
+      ansible.builtin.set_fact:
+        kc_idp_payload:
+          alias: "{{ keycloak_idp_alias }}"
+          displayName: "{{ keycloak_idp_display_name }}"
+          providerId: oidc
+          enabled: true
+          trustEmail: true
+          storeToken: false
+          addReadTokenRoleOnCreate: false
+          authenticateByDefault: false
+          linkOnly: false
+          firstBrokerLoginFlowAlias: "first broker login"
+          config:
+            clientId: "{{ kc_entraid_client_id }}"
+            clientSecret: "{{ kc_entraid_client_secret }}"
+            authorizationUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/oauth2/v2.0/authorize"
+            tokenUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/oauth2/v2.0/token"
+            logoutUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/oauth2/v2.0/logout"
+            issuer: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/v2.0"
+            jwksUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/discovery/v2.0/keys"
+            userInfoUrl: "https://graph.microsoft.com/oidc/userinfo"
+            clientAuthMethod: "client_secret_post"
+            defaultScope: "openid profile email"
+            validateSignature: "true"
+            useJwksUrl: "true"
+            syncMode: "IMPORT"
+      no_log: true
+
+    - name: Create Entra ID Identity Provider in realm {{ keycloak_realm }}
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body: "{{ kc_idp_payload }}"
+        validate_certs: false
+        status_code: [200, 201]
+      when: existing_kc_idp.status == 404
+
+    - name: Update Entra ID Identity Provider in realm {{ keycloak_realm }}
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body: "{{ kc_idp_payload }}"
+        validate_certs: false
+        status_code: [200, 204]
+      when: existing_kc_idp.status == 200
+
+    - name: Fetch existing IdP mappers
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+        validate_certs: false
+        timeout: 60
+        status_code: 200
+      register: existing_kc_mappers
+      until: existing_kc_mappers.status == 200
+      retries: 5
+      delay: 3
+
+    - name: Configure email attribute mapper for Entra ID IdP
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "email"
+          identityProviderAlias: "{{ keycloak_idp_alias }}"
+          identityProviderMapper: "oidc-user-attribute-idp-mapper"
+          config:
+            user.attribute: "email"
+            claim: "email"
+            syncMode: "INHERIT"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 201, 409]
+      register: email_mapper_res
+      until: email_mapper_res.status in [200, 201, 409]
+      retries: 3
+      delay: 3
+      when: "'email' not in (existing_kc_mappers.json | map(attribute='name') | list)"
+
+    - name: Configure username attribute mapper for Entra ID IdP
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "username"
+          identityProviderAlias: "{{ keycloak_idp_alias }}"
+          identityProviderMapper: "oidc-username-template-mapper"
+          config:
+            template: "${CLAIM.preferred_username}"
+            syncMode: "INHERIT"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 201, 409]
+      register: username_mapper_res
+      until: username_mapper_res.status in [200, 201, 409]
+      retries: 3
+      delay: 3
+      when: "'username' not in (existing_kc_mappers.json | map(attribute='name') | list)"
+
+    - name: Configure first name attribute mapper for Entra ID IdP
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "firstName"
+          identityProviderAlias: "{{ keycloak_idp_alias }}"
+          identityProviderMapper: "oidc-user-attribute-idp-mapper"
+          config:
+            user.attribute: "firstName"
+            claim: "given_name"
+            syncMode: "INHERIT"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 201, 409]
+      when: "'firstName' not in (existing_kc_mappers.json | map(attribute='name') | list)"
+
+    - name: Configure last name attribute mapper for Entra ID IdP
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "lastName"
+          identityProviderAlias: "{{ keycloak_idp_alias }}"
+          identityProviderMapper: "oidc-user-attribute-idp-mapper"
+          config:
+            user.attribute: "lastName"
+            claim: "family_name"
+            syncMode: "INHERIT"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 201, 409]
+      when: "'lastName' not in (existing_kc_mappers.json | map(attribute='name') | list)"
+
+    - name: Configure full name attribute mapper for Entra ID IdP
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "fullName"
+          identityProviderAlias: "{{ keycloak_idp_alias }}"
+          identityProviderMapper: "oidc-user-attribute-idp-mapper"
+          config:
+            user.attribute: "fullName"
+            claim: "name"
+            syncMode: "INHERIT"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 201, 409]
+      register: fullname_mapper_res
+      until: fullname_mapper_res.status in [200, 201, 409]
+      retries: 3
+      delay: 3
+      when: "'fullName' not in (existing_kc_mappers.json | map(attribute='name') | list)"
+
+    - name: Configure admin role mapper for Entra ID IdP
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "admin-role"
+          identityProviderAlias: "{{ keycloak_idp_alias }}"
+          identityProviderMapper: "oidc-hardcoded-role-idp-mapper"
+          config:
+            role: "admin"
+            syncMode: "FORCE"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 201, 409]
+      register: admin_role_mapper_res
+      until: admin_role_mapper_res.status in [200, 201, 409]
+      retries: 3
+      delay: 3
+      when: "'admin-role' not in (existing_kc_mappers.json | map(attribute='name') | list)"
+
+    - name: Get admin role definition
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/roles/admin"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+        validate_certs: false
+        timeout: 60
+        status_code: 200
+      register: kc_admin_role_def
+
+    - name: Get users in realm {{ keycloak_realm }}
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/users"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+        validate_certs: false
+        timeout: 60
+        status_code: 200
+      register: kc_realm_users
+
+    - name: Assign admin role to users in master realm
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/users/{{ item.id }}/role-mappings/realm"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          - id: "{{ kc_admin_role_def.json.id }}"
+            name: "{{ kc_admin_role_def.json.name }}"
+        validate_certs: false
+        timeout: 60
+        status_code: [200, 204]
+      loop: "{{ kc_realm_users.json }}"
+      when: item.username != 'temp-admin'
+
+    - name: Display IdP configuration result
+      ansible.builtin.debug:
+        msg:
+          - "🎉 Microsoft Entra ID Identity Provider configured in Keycloak realm '{{ keycloak_realm }}'!"
+          - "Realm: {{ keycloak_realm }}"
+          - "IdP Alias: {{ keycloak_idp_alias }}"
+          - "Display Name: {{ keycloak_idp_display_name }}"
+          - "Login URL: https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}/account"

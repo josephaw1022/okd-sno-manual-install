@@ -48,6 +48,17 @@
       register: minio_operator_apply
       changed_when: false
 
+    - name: Ensure MinIO operator namespace has ambient mesh label
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ minio_operator_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
+
     - name: Get existing MinIO operator SCC runAsUser UID
       ansible.builtin.command:
         cmd: oc get scc {{ minio_scc_name }} -o jsonpath={.runAsUser.uid}

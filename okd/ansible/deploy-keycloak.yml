@@ -24,6 +24,10 @@
     keycloak_db_name: "{{ lookup('env', 'KEYCLOAK_DB_NAME') | default('keycloak', true) }}"
     keycloak_db_secret_name: "{{ lookup('env', 'KEYCLOAK_DB_SECRET_NAME') | default('keycloak-postgres-cluster-app', true) }}"
     keycloak_strict_hostname: "{{ lookup('env', 'KEYCLOAK_STRICT_HOSTNAME') | default('false', true) | bool }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_REALM') | default('master', true) }}"
+    keycloak_entraid_secret_name: "{{ lookup('env', 'KEYCLOAK_ENTRAID_SECRET_NAME') | default('keycloak-entraid-secret', true) }}"
+    keycloak_idp_alias: "{{ lookup('env', 'KEYCLOAK_IDP_ALIAS') | default('azure', true) }}"
+    keycloak_idp_display_name: "{{ lookup('env', 'KEYCLOAK_IDP_DISPLAY_NAME') | default('Microsoft Entra ID', true) }}"
 
   tasks:
     - name: Check if connected to OpenShift
@@ -48,6 +52,8 @@
           kind: Namespace
           metadata:
             name: "{{ keycloak_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
 
     - name: Grant anyuid SCC to serviceaccounts in keycloak namespace
       ansible.builtin.command:
@@ -125,6 +131,25 @@
           type: kubernetes.io/tls
           data: "{{ tls_sec_info.resources[0].data }}"
 
+    - name: Check if Entra ID secret exists in namespace {{ keycloak_namespace }}
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_entraid_secret_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: entraid_sec_check
+      failed_when: false
+
+    - name: Configure Entra ID Identity Provider in Keycloak master realm
+      ansible.builtin.include_tasks: tasks/configure-keycloak-idp.yml
+      when: entraid_sec_check.resources is defined and entraid_sec_check.resources | length > 0
+
+    - name: Notice if Entra ID secret is not found
+      ansible.builtin.debug:
+        msg:
+          - "ℹ️ Entra ID secret '{{ keycloak_entraid_secret_name }}' not found in namespace '{{ keycloak_namespace }}'."
+          - "To configure Microsoft Entra ID for the master realm, run: make setup-keycloak-entraid"
+      when: entraid_sec_check.resources is not defined or entraid_sec_check.resources | length == 0
+
     - name: Display Keycloak deployment status
       ansible.builtin.debug:
         msg:
@@ -136,3 +161,4 @@
           - "TLS Secret: {{ keycloak_tls_secret }}"
           - "ClusterIssuer: {{ keycloak_cluster_issuer }}"
           - "Database: {{ keycloak_db_host }}:{{ keycloak_db_port }}/{{ keycloak_db_name }}"
+          - "Entra ID IdP: {{ 'Configured' if (entraid_sec_check.resources is defined and entraid_sec_check.resources | length > 0) else 'Not configured (run make setup-keycloak-entraid)' }}"

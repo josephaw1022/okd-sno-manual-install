@@ -1,0 +1,59 @@
+---
+# Ansible playbook to remove Istio ambient mesh label from namespaces
+# Usage: ansible-playbook -i inventory.yml unlabel-istio-ambient-namespaces.yml
+
+- name: Remove Istio ambient mesh label from namespaces
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    istio_ambient_namespaces_env: "{{ lookup('env', 'ISTIO_AMBIENT_NAMESPACES') | default('', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Query all namespaces with ambient label
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        label_selectors:
+          - "istio.io/dataplane-mode=ambient"
+      register: ambient_namespaces
+      when: istio_ambient_namespaces_env | length == 0
+
+    - name: Determine target namespaces to unlabel
+      ansible.builtin.set_fact:
+        unlabel_targets: >-
+          {{
+            (istio_ambient_namespaces_env | length > 0)
+            | ternary(istio_ambient_namespaces_env.split(',') | map('trim') | list,
+                      ambient_namespaces.resources | map(attribute='metadata.name') | list)
+          }}
+
+    - name: Remove ambient mesh label from namespaces
+      ansible.builtin.command:
+        cmd: "oc label namespace {{ item }} istio.io/dataplane-mode-"
+      loop: "{{ unlabel_targets }}"
+      register: unlabel_results
+      changed_when: "'unlabeled' in unlabel_results.stdout"
+      failed_when: false
+
+    - name: Display unlabel status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Istio ambient mesh data plane disabled for namespaces:"
+          - "{{ unlabel_targets }}"
