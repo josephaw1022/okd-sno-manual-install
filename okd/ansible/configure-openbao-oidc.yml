@@ -1,0 +1,239 @@
+---
+# Ansible playbook to initialize, unseal, and configure Keycloak OIDC authentication on OpenBao
+# Usage: ansible-playbook -i inventory.yml configure-openbao-oidc.yml
+
+- name: Initialize, Unseal, and Configure Keycloak OIDC for OpenBao
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    openbao_namespace: "{{ lookup('env', 'OPENBAO_NAMESPACE') | default('openbao', true) }}"
+    openbao_name: "{{ lookup('env', 'OPENBAO_NAME') | default('openbao', true) }}"
+    openbao_replicas: "{{ lookup('env', 'OPENBAO_REPLICAS') | default(3, true) | int }}"
+    openbao_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    openbao_hostname: "{{ lookup('env', 'OPENBAO_HOSTNAME') | default('openbao.homelab.' + openbao_base_domain, true) }}"
+    keycloak_hostname: "{{ lookup('env', 'KEYCLOAK_HOSTNAME') | default('keycloak.homelab.' + openbao_base_domain, true) }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_HOMELAB_REALM') | default('homelab', true) }}"
+    openbao_client_id: "{{ lookup('env', 'OPENBAO_KEYCLOAK_CLIENT_NAME') | default('openbao', true) }}"
+    openbao_unseal_secret: "{{ lookup('env', 'OPENBAO_UNSEAL_SECRET') | default('openbao-init-unseal', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Wait for openbao-0 pod to be running
+      kubernetes.core.k8s_info:
+        kind: Pod
+        name: "{{ openbao_name }}-0"
+        namespace: "{{ openbao_namespace }}"
+      register: pod_check
+      until: pod_check.resources | length > 0 and pod_check.resources[0].status.phase == 'Running'
+      retries: 40
+      delay: 5
+
+    - name: Check OpenBao init status
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- bao status -format=json"
+      register: bao_status_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Parse OpenBao status
+      ansible.builtin.set_fact:
+        bao_status: "{{ bao_status_raw.stdout | from_json }}"
+      when: bao_status_raw.stdout | length > 0 and (bao_status_raw.stdout | from_json) is defined
+
+    - name: Check if unseal secret already exists in cluster
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_unseal_secret }}"
+        namespace: "{{ openbao_namespace }}"
+      register: existing_unseal_sec
+
+    # Step 1: Initialize OpenBao if not initialized
+    - name: Initialize OpenBao cluster
+      when: (bao_status is defined and not bao_status.initialized) or (existing_unseal_sec.resources | length == 0 and (bao_status is defined and not bao_status.initialized))
+      block:
+        - name: Run bao operator init
+          ansible.builtin.command:
+            cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- bao operator init -key-shares=5 -key-threshold=3 -format=json"
+          register: init_output
+          no_log: true
+
+        - name: Parse init output
+          ansible.builtin.set_fact:
+            init_json: "{{ init_output.stdout | from_json }}"
+          no_log: true
+
+        - name: Save unseal keys and root token to Kubernetes Secret
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: "{{ openbao_unseal_secret }}"
+                namespace: "{{ openbao_namespace }}"
+                labels:
+                  app.kubernetes.io/name: openbao
+                  app.kubernetes.io/component: init-unseal
+              type: Opaque
+              stringData:
+                root_token: "{{ init_json.root_token }}"
+                unseal_key_1: "{{ init_json.unseal_keys_b64[0] }}"
+                unseal_key_2: "{{ init_json.unseal_keys_b64[1] }}"
+                unseal_key_3: "{{ init_json.unseal_keys_b64[2] }}"
+                unseal_key_4: "{{ init_json.unseal_keys_b64[3] }}"
+                unseal_key_5: "{{ init_json.unseal_keys_b64[4] }}"
+                unseal_keys_json: "{{ init_json.unseal_keys_b64 | to_json }}"
+          no_log: true
+
+    - name: Retrieve unseal credentials from Kubernetes Secret
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_unseal_secret }}"
+        namespace: "{{ openbao_namespace }}"
+      register: unseal_sec_info
+      until: unseal_sec_info.resources | length > 0
+      retries: 20
+      delay: 3
+
+    - name: Extract unseal keys and root token
+      ansible.builtin.set_fact:
+        root_token: "{{ unseal_sec_info.resources[0].data.root_token | b64decode }}"
+        unseal_key_1: "{{ unseal_sec_info.resources[0].data.unseal_key_1 | b64decode }}"
+        unseal_key_2: "{{ unseal_sec_info.resources[0].data.unseal_key_2 | b64decode }}"
+        unseal_key_3: "{{ unseal_sec_info.resources[0].data.unseal_key_3 | b64decode }}"
+      no_log: true
+
+    # Step 2: Unseal each OpenBao pod replica
+    - name: Unseal OpenBao pod replicas
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-{{ item[0] }} -- bao operator unseal {{ item[1] }}"
+      loop: "{{ q('cartesian', range(0, openbao_replicas | int) | list, [unseal_key_1, unseal_key_2, unseal_key_3]) }}"
+      no_log: true
+      changed_when: true
+      failed_when: false
+
+    # Step 3: Get Keycloak client secret
+    - name: Get OpenBao Keycloak client secret
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "keycloak-client-{{ openbao_client_id }}-secret"
+        namespace: "{{ openbao_namespace }}"
+      register: kc_client_sec
+      until: kc_client_sec.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Extract Keycloak client secret
+      ansible.builtin.set_fact:
+        openbao_client_secret: "{{ (kc_client_sec.resources[0].data.clientSecret | default(kc_client_sec.resources[0].data.client_secret, true)) | b64decode }}"
+      no_log: true
+
+    # Step 4: Configure OpenBao OIDC Auth method
+    - name: Check enabled auth methods in OpenBao
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- env BAO_TOKEN={{ root_token }} bao auth list -format=json"
+      register: auth_list_raw
+      no_log: true
+      changed_when: false
+      failed_when: false
+
+    - name: Enable OIDC auth method if not enabled
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- env BAO_TOKEN={{ root_token }} bao auth enable oidc"
+      when: "'oidc/' not in auth_list_raw.stdout"
+      no_log: true
+      changed_when: true
+      failed_when: false
+
+    - name: Configure OpenBao OIDC authentication settings
+      ansible.builtin.command:
+        cmd: >
+          oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 --
+          env BAO_TOKEN={{ root_token }}
+          bao write auth/oidc/config
+          oidc_discovery_url="https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}"
+          oidc_client_id="{{ openbao_client_id }}"
+          oidc_client_secret="{{ openbao_client_secret }}"
+          default_role="homelab-user"
+      no_log: true
+      changed_when: true
+
+    - name: Create default policy for homelab users
+      ansible.builtin.command:
+        cmd: >
+          oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 --
+          env BAO_TOKEN={{ root_token }}
+          sh -c 'printf "path \"secret/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\npath \"kv/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\npath \"sys/mounts\" {\n  capabilities = [\"read\", \"list\"]\n}\n" | bao policy write homelab-user -'
+      no_log: true
+      changed_when: true
+
+    - name: Configure OpenBao OIDC role for homelab-user
+      ansible.builtin.command:
+        cmd: >
+          oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 --
+          env BAO_TOKEN={{ root_token }}
+          bao write auth/oidc/role/homelab-user
+          user_claim="preferred_username"
+          allowed_redirect_uris="https://{{ openbao_hostname }}/ui/vault/auth/oidc/oidc/callback,https://{{ openbao_hostname }}/v1/auth/oidc/oidc/callback,http://localhost:8250/oidc/callback"
+          bound_audiences="{{ openbao_client_id }}"
+          policies="default,homelab-user"
+          token_ttl="1h"
+          token_max_ttl="24h"
+      no_log: true
+      changed_when: true
+
+    # Step 5: Enable KV v2 secrets engine if not present
+    - name: Check enabled secrets engines
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- env BAO_TOKEN={{ root_token }} bao secrets list -format=json"
+      register: secrets_list_raw
+      no_log: true
+      changed_when: false
+      failed_when: false
+
+    - name: Enable KV secrets engine at secret/
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- env BAO_TOKEN={{ root_token }} bao secrets enable -path=secret kv-v2"
+      when: "'secret/' not in secrets_list_raw.stdout"
+      no_log: true
+      changed_when: true
+      failed_when: false
+
+    # Step 6: Summary
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "================================================================"
+          - "   OpenBao Initialized, Unsealed & OIDC Configured!             "
+          - "================================================================"
+          - ""
+          - "OpenBao URL:      https://{{ openbao_hostname }}"
+          - "Namespace:        {{ openbao_namespace }}"
+          - "Keycloak Realm:   {{ keycloak_realm }} (https://{{ keycloak_hostname }})"
+          - "Client ID:        {{ openbao_client_id }}"
+          - "Auth Method:      OIDC (Role: homelab-user)"
+          - "Unseal Secret:    {{ openbao_unseal_secret }} (saved in {{ openbao_namespace }})"
+          - ""
+          - "Login to OpenBao Web UI:"
+          - "  1. Navigate to: https://{{ openbao_hostname }}"
+          - "  2. Method: Select 'OIDC'"
+          - "  3. Role:   homelab-user (or leave default)"
+          - "  4. Click 'Sign In' to authenticate with Keycloak / Entra ID"
+          - "================================================================"

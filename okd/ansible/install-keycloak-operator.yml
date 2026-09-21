@@ -42,8 +42,6 @@
           kind: Namespace
           metadata:
             name: "{{ keycloak_namespace }}"
-            labels:
-              istio.io/dataplane-mode: ambient
 
     - name: Apply Keycloak Operator manifests via kustomize
       ansible.builtin.command:

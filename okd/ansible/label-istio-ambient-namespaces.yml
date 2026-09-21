@@ -22,6 +22,7 @@
       - strimzi-kafka
       - minio-operator
       - open-cluster-management
+      - openbao
 
     # System and infrastructure namespaces that MUST NEVER be enrolled into ambient mesh to prevent cluster disruption
     istio_ambient_excluded_namespaces:
@@ -42,6 +43,7 @@
       - datadog-operator
       - cloudflared
       - personal-site
+      - keycloak
 
   tasks:
     - name: Check if connected to OpenShift

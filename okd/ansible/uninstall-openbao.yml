@@ -1,0 +1,55 @@
+---
+# Ansible playbook to uninstall OpenBao Helm release and associated resources
+# Usage: ansible-playbook -i inventory.yml uninstall-openbao.yml
+
+- name: Uninstall OpenBao
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    openbao_namespace: "{{ lookup('env', 'OPENBAO_NAMESPACE') | default('openbao', true) }}"
+    openbao_name: "{{ lookup('env', 'OPENBAO_NAME') | default('openbao', true) }}"
+    openbao_tls_secret: "{{ lookup('env', 'OPENBAO_TLS_SECRET') | default('openbao-tls', true) }}"
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    openbao_client_id: "{{ lookup('env', 'OPENBAO_KEYCLOAK_CLIENT_NAME') | default('openbao', true) }}"
+
+  tasks:
+    - name: Uninstall OpenBao Helm release
+      ansible.builtin.command:
+        cmd: "helm uninstall {{ openbao_name }} --namespace {{ openbao_namespace }} --wait --ignore-not-found"
+      register: openbao_uninstall
+      changed_when: "'uninstalled' in openbao_uninstall.stdout"
+      failed_when: false
+
+    - name: Remove KeycloakClient CR for OpenBao
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1.edp.epam.com/v1
+        kind: KeycloakClient
+        name: "{{ openbao_client_id }}"
+        namespace: "{{ keycloak_namespace }}"
+      failed_when: false
+
+    - name: Remove TLS secret from istio-ingress namespace
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Secret
+        name: "{{ openbao_tls_secret }}"
+        namespace: istio-ingress
+      failed_when: false
+
+    - name: Delete openbao namespace
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ openbao_namespace }}"
+      failed_when: false
+
+    - name: Display uninstall status
+      ansible.builtin.debug:
+        msg: "✅ OpenBao uninstalled and namespace {{ openbao_namespace }} cleaned up"

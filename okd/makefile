@@ -1802,6 +1802,14 @@ KEYCLOAK_ENTRAID_APP_NAME ?= Keycloak-Master-Realm-OAuth
 KEYCLOAK_ENTRAID_SECRET_NAME ?= keycloak-entraid-secret
 KEYCLOAK_IDP_ALIAS ?= azure
 KEYCLOAK_IDP_DISPLAY_NAME ?= Microsoft Entra ID
+KEYCLOAK_EDP_OPERATOR_HELM_RELEASE ?= keycloak-edp-operator
+KEYCLOAK_EDP_OPERATOR_HELM_REPO_NAME ?= epamedp
+KEYCLOAK_EDP_OPERATOR_HELM_REPO_URL ?= https://epam.github.io/edp-helm-charts/stable
+KEYCLOAK_EDP_OPERATOR_CHART_VERSION ?= 1.35.0
+KEYCLOAK_HOMELAB_REALM ?= homelab
+KEYCLOAK_HOMELAB_ENTRAID_APP_NAME ?= Keycloak-Homelab-Realm-OAuth
+KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME ?= keycloak-homelab-entraid-secret
+KEYCLOAK_HOMELAB_USER_GROUP ?= homelab-user
 
 
 .PHONY: install-keycloak-operator
@@ -1813,6 +1821,46 @@ install-keycloak-operator: ## Install Keycloak Operator via kustomize.
 	ansible-playbook -i inventory.yml install-keycloak-operator.yml && \
 	popd > /dev/null
 	@echo "✅ Keycloak Operator installed"
+
+
+.PHONY: install-keycloak-edp-operator install-edp-keycloak-operator
+install-keycloak-edp-operator: ## Install Keycloak EDP Operator via Helm and connect it to Keycloak.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "📦 Installing Keycloak EDP Operator in namespace $(KEYCLOAK_NAMESPACE)..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_EDP_OPERATOR_HELM_RELEASE="$(KEYCLOAK_EDP_OPERATOR_HELM_RELEASE)" \
+	KEYCLOAK_EDP_OPERATOR_HELM_REPO_NAME="$(KEYCLOAK_EDP_OPERATOR_HELM_REPO_NAME)" \
+	KEYCLOAK_EDP_OPERATOR_HELM_REPO_URL="$(KEYCLOAK_EDP_OPERATOR_HELM_REPO_URL)" \
+	KEYCLOAK_EDP_OPERATOR_CHART_VERSION="$(KEYCLOAK_EDP_OPERATOR_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml install-keycloak-edp-operator.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak EDP Operator installed and connected"
+
+install-edp-keycloak-operator: install-keycloak-edp-operator
+
+
+.PHONY: uninstall-keycloak-edp-operator uninstall-edp-keycloak-operator
+uninstall-keycloak-edp-operator: ## Uninstall Keycloak EDP Operator Helm release.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling Keycloak EDP Operator..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_EDP_OPERATOR_HELM_RELEASE="$(KEYCLOAK_EDP_OPERATOR_HELM_RELEASE)" \
+	ansible-playbook -i inventory.yml uninstall-keycloak-edp-operator.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak EDP Operator uninstalled"
+
+uninstall-edp-keycloak-operator: uninstall-keycloak-edp-operator
 
 
 .PHONY: deploy-keycloak-postgres deploy-keycloak-db
@@ -1860,6 +1908,54 @@ create-keycloak-entraid-app: setup-keycloak-entraid ## Alias for setup-keycloak-
 configure-keycloak-entraid: setup-keycloak-entraid ## Alias for setup-keycloak-entraid.
 
 
+.PHONY: setup-keycloak-homelab-entraid setup-homelab-entraid-group create-homelab-user-group
+setup-keycloak-homelab-entraid: ## Create Entra ID homelab-user group, add all users, and configure app registration & secret for homelab realm.
+	@echo "🔐 Setting up Entra ID homelab-user group & Homelab Realm OAuth..."
+	@pushd ansible > /dev/null && \
+	TENANT=$${AZURE_TENANT_ID:-$$(az account show --query tenantId -o tsv 2>/dev/null)}; \
+	SUB=$${AZURE_SUBSCRIPTION_ID:-$$(az account show --query id -o tsv 2>/dev/null)}; \
+	if [ -z "$$TENANT" ] || [ -z "$$SUB" ]; then \
+		echo "❌ Azure credentials not found. Run 'az login' first."; \
+		exit 1; \
+	fi; \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_HOMELAB_REALM="$(KEYCLOAK_HOMELAB_REALM)" \
+	KEYCLOAK_HOMELAB_ENTRAID_APP_NAME="$(KEYCLOAK_HOMELAB_ENTRAID_APP_NAME)" \
+	KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME="$(KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME)" \
+	KEYCLOAK_HOMELAB_USER_GROUP="$(KEYCLOAK_HOMELAB_USER_GROUP)" \
+	KEYCLOAK_IDP_ALIAS="$(KEYCLOAK_IDP_ALIAS)" \
+	KEYCLOAK_IDP_DISPLAY_NAME="$(KEYCLOAK_IDP_DISPLAY_NAME)" \
+	ansible-playbook -i inventory.yml setup-keycloak-homelab-entraid.yml \
+		-e "azure_tenant_id=$$TENANT" \
+		-e "azure_subscription_id=$$SUB" && \
+	popd > /dev/null
+	@echo "✅ Entra ID homelab group and app registration configured"
+
+setup-homelab-entraid-group: setup-keycloak-homelab-entraid
+create-homelab-user-group: setup-keycloak-homelab-entraid
+
+
+.PHONY: configure-keycloak-homelab-realm deploy-keycloak-homelab-realm setup-keycloak-homelab-realm
+configure-keycloak-homelab-realm: ## Configure generic homelab realm and Entra ID IdP with homelab-user group access.
+	@echo "👑 Configuring Keycloak Homelab Realm ($(KEYCLOAK_HOMELAB_REALM))..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_NAME="$(KEYCLOAK_NAME)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_HOMELAB_REALM="$(KEYCLOAK_HOMELAB_REALM)" \
+	KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME="$(KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME)" \
+	KEYCLOAK_IDP_ALIAS="$(KEYCLOAK_IDP_ALIAS)" \
+	KEYCLOAK_IDP_DISPLAY_NAME="$(KEYCLOAK_IDP_DISPLAY_NAME)" \
+	ansible-playbook -i inventory.yml configure-keycloak-homelab-realm.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak homelab realm configured"
+
+deploy-keycloak-homelab-realm: configure-keycloak-homelab-realm
+setup-keycloak-homelab-realm: configure-keycloak-homelab-realm
+
+
 .PHONY: deploy-keycloak create-keycloak
 deploy-keycloak: ## Deploy Keycloak Custom Resource (Istio ingress, cert-manager TLS, CNPG DB, and Entra ID IdP).
 	@echo "👑 Deploying Keycloak CR ($(KEYCLOAK_NAME)) at $(KEYCLOAK_HOSTNAME)..."
@@ -1887,14 +1983,14 @@ create-keycloak: deploy-keycloak ## Create and deploy Keycloak CR (alias for dep
 
 
 .PHONY: install-keycloak setup-keycloak
-install-keycloak: install-keycloak-operator deploy-keycloak-postgres deploy-keycloak ## Install Keycloak Operator, PostgreSQL cluster, and Keycloak CR.
+install-keycloak: install-keycloak-operator deploy-keycloak-postgres deploy-keycloak install-keycloak-edp-operator ## Install Keycloak Operator, PostgreSQL cluster, Keycloak CR, and EDP Operator.
 	@echo "🎉 Keycloak complete setup finished"
 
 setup-keycloak: install-keycloak
 
 
 .PHONY: setup-keycloak-all install-keycloak-all
-setup-keycloak-all: setup-keycloak-entraid install-keycloak ## Complete Keycloak setup including Entra ID app registration, operator, database, and Keycloak CR.
+setup-keycloak-all: setup-keycloak-entraid install-keycloak setup-keycloak-homelab-entraid configure-keycloak-homelab-realm ## Complete Keycloak setup including master and homelab realms, Entra ID groups, operator, database, and CRs.
 install-keycloak-all: setup-keycloak-all
 
 
@@ -1911,6 +2007,148 @@ uninstall-keycloak: ## Uninstall Keycloak CR, PostgreSQL cluster, and operator.
 	@echo "✅ Keycloak uninstalled"
 
 destroy-keycloak: uninstall-keycloak
+
+
+##@ OpenBao
+
+OPENBAO_NAMESPACE ?= openbao
+OPENBAO_NAME ?= openbao
+OPENBAO_REPLICAS ?= 3
+OPENBAO_HOSTNAME ?= openbao.homelab.$(BASE_DOMAIN)
+OPENBAO_INGRESS_CLASS ?= istio
+OPENBAO_TLS_SECRET ?= openbao-tls
+OPENBAO_CLUSTER_ISSUER ?= cloudflare-dns01
+OPENBAO_DB_NAME ?= openbao
+OPENBAO_DB_USER ?= openbao
+OPENBAO_POSTGRES_NAME ?= openbao-postgres-cluster
+OPENBAO_POSTGRES_INSTANCES ?= 3
+OPENBAO_POSTGRES_STORAGE_SIZE ?= 5Gi
+OPENBAO_POSTGRES_STORAGE_CLASS ?=
+OPENBAO_HELM_REPO_NAME ?= openbao
+OPENBAO_HELM_REPO_URL ?= https://openbao.github.io/openbao-helm
+OPENBAO_CHART_VERSION ?= 0.29.5
+OPENBAO_KEYCLOAK_CLIENT_NAME ?= openbao
+OPENBAO_KEYCLOAK_REALM ?= homelab
+OPENBAO_UNSEAL_SECRET ?= openbao-init-unseal
+
+
+.PHONY: deploy-openbao-postgres deploy-openbao-db
+deploy-openbao-postgres: ## Deploy CloudNativePG PostgreSQL Cluster for OpenBao.
+	@echo "🐘 Deploying CloudNativePG PostgreSQL cluster for OpenBao..."
+	@pushd ansible > /dev/null && \
+	OPENBAO_NAMESPACE="$(OPENBAO_NAMESPACE)" \
+	OPENBAO_POSTGRES_NAME="$(OPENBAO_POSTGRES_NAME)" \
+	OPENBAO_POSTGRES_INSTANCES="$(OPENBAO_POSTGRES_INSTANCES)" \
+	OPENBAO_DB_NAME="$(OPENBAO_DB_NAME)" \
+	OPENBAO_DB_USER="$(OPENBAO_DB_USER)" \
+	OPENBAO_POSTGRES_STORAGE_SIZE="$(OPENBAO_POSTGRES_STORAGE_SIZE)" \
+	OPENBAO_POSTGRES_STORAGE_CLASS="$(OPENBAO_POSTGRES_STORAGE_CLASS)" \
+	ansible-playbook -i inventory.yml deploy-openbao-postgres.yml && \
+	popd > /dev/null
+	@echo "✅ OpenBao PostgreSQL cluster deployed"
+
+deploy-openbao-db: deploy-openbao-postgres
+
+
+.PHONY: create-openbao-keycloak-client setup-openbao-keycloak-client
+create-openbao-keycloak-client: ## Create Keycloak EDP Operator client resource for OpenBao in homelab realm.
+	@echo "🔑 Creating Keycloak client for OpenBao in $(OPENBAO_KEYCLOAK_REALM) realm..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_HOMELAB_REALM="$(OPENBAO_KEYCLOAK_REALM)" \
+	OPENBAO_NAMESPACE="$(OPENBAO_NAMESPACE)" \
+	OPENBAO_HOSTNAME="$(OPENBAO_HOSTNAME)" \
+	OPENBAO_KEYCLOAK_CLIENT_NAME="$(OPENBAO_KEYCLOAK_CLIENT_NAME)" \
+	ansible-playbook -i inventory.yml create-openbao-keycloak-client.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak client for OpenBao created and secret synced"
+
+setup-openbao-keycloak-client: create-openbao-keycloak-client
+
+
+.PHONY: deploy-openbao install-openbao
+deploy-openbao: ## Deploy OpenBao HA via Helm with PostgreSQL backend and Istio ingress.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Install Helm 3.x and retry."; \
+	  exit 1; \
+	fi
+	@echo "🔐 Deploying OpenBao HA ($(OPENBAO_NAME)) at $(OPENBAO_HOSTNAME)..."
+	@pushd ansible > /dev/null && \
+	OPENBAO_NAMESPACE="$(OPENBAO_NAMESPACE)" \
+	OPENBAO_NAME="$(OPENBAO_NAME)" \
+	OPENBAO_REPLICAS="$(OPENBAO_REPLICAS)" \
+	OPENBAO_HOSTNAME="$(OPENBAO_HOSTNAME)" \
+	OPENBAO_INGRESS_CLASS="$(OPENBAO_INGRESS_CLASS)" \
+	OPENBAO_TLS_SECRET="$(OPENBAO_TLS_SECRET)" \
+	OPENBAO_CLUSTER_ISSUER="$(OPENBAO_CLUSTER_ISSUER)" \
+	OPENBAO_POSTGRES_NAME="$(OPENBAO_POSTGRES_NAME)" \
+	OPENBAO_DB_NAME="$(OPENBAO_DB_NAME)" \
+	OPENBAO_HELM_REPO_NAME="$(OPENBAO_HELM_REPO_NAME)" \
+	OPENBAO_HELM_REPO_URL="$(OPENBAO_HELM_REPO_URL)" \
+	OPENBAO_CHART_VERSION="$(OPENBAO_CHART_VERSION)" \
+	ansible-playbook -i inventory.yml deploy-openbao.yml && \
+	popd > /dev/null
+	@echo "✅ OpenBao HA deployed"
+
+install-openbao: deploy-openbao
+
+
+.PHONY: init-openbao setup-openbao-oidc configure-openbao-oidc
+init-openbao: ## Initialize, unseal, and configure Keycloak OIDC authentication on OpenBao.
+	@echo "🔓 Initializing, unsealing, and configuring OIDC on OpenBao..."
+	@pushd ansible > /dev/null && \
+	OPENBAO_NAMESPACE="$(OPENBAO_NAMESPACE)" \
+	OPENBAO_NAME="$(OPENBAO_NAME)" \
+	OPENBAO_REPLICAS="$(OPENBAO_REPLICAS)" \
+	OPENBAO_HOSTNAME="$(OPENBAO_HOSTNAME)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_HOMELAB_REALM="$(OPENBAO_KEYCLOAK_REALM)" \
+	OPENBAO_KEYCLOAK_CLIENT_NAME="$(OPENBAO_KEYCLOAK_CLIENT_NAME)" \
+	OPENBAO_UNSEAL_SECRET="$(OPENBAO_UNSEAL_SECRET)" \
+	ansible-playbook -i inventory.yml configure-openbao-oidc.yml && \
+	popd > /dev/null
+	@echo "✅ OpenBao initialized and Keycloak OIDC configured"
+
+setup-openbao-oidc: init-openbao
+configure-openbao-oidc: init-openbao
+
+
+.PHONY: restart-openbao
+restart-openbao: ## Restart OpenBao pods and automatically unseal all replicas.
+	@echo "🔄 Restarting OpenBao pods and unsealing replicas..."
+	@pushd ansible > /dev/null && \
+	OPENBAO_NAMESPACE="$(OPENBAO_NAMESPACE)" \
+	OPENBAO_NAME="$(OPENBAO_NAME)" \
+	OPENBAO_REPLICAS="$(OPENBAO_REPLICAS)" \
+	OPENBAO_UNSEAL_SECRET="$(OPENBAO_UNSEAL_SECRET)" \
+	ansible-playbook -i inventory.yml restart-openbao.yml && \
+	popd > /dev/null
+	@echo "✅ OpenBao pods restarted and unsealed"
+
+
+.PHONY: setup-openbao-all install-openbao-all
+setup-openbao-all: deploy-openbao-postgres create-openbao-keycloak-client deploy-openbao init-openbao ## Complete OpenBao setup (database, Keycloak client, deployment, and OIDC initialization).
+install-openbao-all: setup-openbao-all
+
+
+.PHONY: uninstall-openbao destroy-openbao
+uninstall-openbao: ## Uninstall OpenBao Helm release, database cluster, and Keycloak client.
+	@if ! command -v helm >/dev/null 2>&1; then \
+	  echo "❌ helm is not installed. Cannot uninstall Helm release."; \
+	  exit 1; \
+	fi
+	@echo "🗑️ Uninstalling OpenBao..."
+	@pushd ansible > /dev/null && \
+	OPENBAO_NAMESPACE="$(OPENBAO_NAMESPACE)" \
+	OPENBAO_NAME="$(OPENBAO_NAME)" \
+	OPENBAO_TLS_SECRET="$(OPENBAO_TLS_SECRET)" \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	OPENBAO_KEYCLOAK_CLIENT_NAME="$(OPENBAO_KEYCLOAK_CLIENT_NAME)" \
+	ansible-playbook -i inventory.yml uninstall-openbao.yml && \
+	popd > /dev/null
+	@echo "✅ OpenBao uninstalled"
+
+destroy-openbao: uninstall-openbao
 
 
 ##@ Actions Runner Controller (ARC)

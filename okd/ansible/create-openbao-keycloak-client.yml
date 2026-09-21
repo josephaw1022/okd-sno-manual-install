@@ -1,0 +1,101 @@
+---
+# Ansible playbook to create Keycloak EDP Operator client resource for OpenBao in homelab realm
+# Usage: ansible-playbook -i inventory.yml create-openbao-keycloak-client.yml
+
+- name: Create Keycloak EDP Client Resource for OpenBao
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_HOMELAB_REALM') | default('homelab', true) }}"
+    openbao_namespace: "{{ lookup('env', 'OPENBAO_NAMESPACE') | default('openbao', true) }}"
+    openbao_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    openbao_hostname: "{{ lookup('env', 'OPENBAO_HOSTNAME') | default('openbao.homelab.' + openbao_base_domain, true) }}"
+    openbao_client_id: "{{ lookup('env', 'OPENBAO_KEYCLOAK_CLIENT_NAME') | default('openbao', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure keycloak and openbao namespaces exist
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ item }}"
+      loop:
+        - "{{ keycloak_namespace }}"
+        - "{{ openbao_namespace }}"
+
+    - name: Apply EDP KeycloakClient Custom Resource for OpenBao
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1.edp.epam.com/v1
+          kind: KeycloakClient
+          metadata:
+            name: "{{ openbao_client_id }}"
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            clientId: "{{ openbao_client_id }}"
+            realmRef:
+              kind: KeycloakRealm
+              name: "{{ keycloak_realm }}"
+            standardFlowEnabled: true
+            webUrl: "https://{{ openbao_hostname }}"
+            redirectUris:
+              - "https://{{ openbao_hostname }}/ui/vault/auth/oidc/oidc/callback"
+              - "https://{{ openbao_hostname }}/v1/auth/oidc/oidc/callback"
+              - "http://localhost:8250/oidc/callback"
+              - "https://{{ openbao_hostname }}/*"
+            attributes:
+              post.logout.redirect.uris: "+"
+
+    - name: Wait for Keycloak client secret in keycloak namespace
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "keycloak-client-{{ openbao_client_id }}-secret"
+        namespace: "{{ keycloak_namespace }}"
+      register: client_secret_info
+      until: client_secret_info.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Sync Keycloak client secret to openbao namespace
+      when: client_secret_info.resources | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "keycloak-client-{{ openbao_client_id }}-secret"
+            namespace: "{{ openbao_namespace }}"
+          type: Opaque
+          data: "{{ client_secret_info.resources[0].data }}"
+
+    - name: Display Keycloak client creation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak client '{{ openbao_client_id }}' created successfully in realm '{{ keycloak_realm }}'!"
+          - "Client ID:    {{ openbao_client_id }}"
+          - "Realm:        {{ keycloak_realm }}"
+          - "Web URL:      https://{{ openbao_hostname }}"
+          - "Secret:       keycloak-client-{{ openbao_client_id }}-secret (synced to {{ openbao_namespace }})"

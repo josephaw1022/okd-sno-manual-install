@@ -1,0 +1,337 @@
+---
+# Ansible playbook to configure Microsoft Entra ID (Azure AD) for Keycloak homelab realm
+# Usage: ansible-playbook -i inventory.yml setup-keycloak-homelab-entraid.yml
+#
+# Prerequisites:
+#   - Azure CLI logged in (az login)
+#
+# Required variables (pass via environment or -e):
+#   - azure_tenant_id: Your Azure tenant ID
+#   - azure_subscription_id: Your Azure subscription ID
+
+- name: Configure Entra ID Group and App Registration for Keycloak Homelab Realm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    HOME: "{{ lookup('env', 'HOME') }}"
+    AZURE_CONFIG_DIR: "{{ lookup('env', 'HOME') }}/.azure"
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    # Keycloak settings
+    keycloak_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    keycloak_hostname: "{{ lookup('env', 'KEYCLOAK_HOSTNAME') | default('keycloak.homelab.' + keycloak_base_domain, true) }}"
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_name: "{{ lookup('env', 'KEYCLOAK_NAME') | default('keycloak', true) }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_HOMELAB_REALM') | default('homelab', true) }}"
+    keycloak_idp_alias: "{{ lookup('env', 'KEYCLOAK_IDP_ALIAS') | default('azure', true) }}"
+    keycloak_idp_display_name: "{{ lookup('env', 'KEYCLOAK_IDP_DISPLAY_NAME') | default('Microsoft Entra ID', true) }}"
+
+    # Azure settings
+    azure_tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
+    azure_subscription_id: "{{ lookup('env', 'AZURE_SUBSCRIPTION_ID') }}"
+
+    # Group and App registration settings
+    homelab_group_name: "{{ lookup('env', 'KEYCLOAK_HOMELAB_USER_GROUP') | default('homelab-user', true) }}"
+    app_display_name: "{{ lookup('env', 'KEYCLOAK_HOMELAB_ENTRAID_APP_NAME') | default('Keycloak-Homelab-Realm-OAuth', true) }}"
+    keycloak_entraid_secret_name: "{{ lookup('env', 'KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME') | default('keycloak-homelab-entraid-secret', true) }}"
+    oauth_redirect_uris:
+      - "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}/broker/{{ keycloak_idp_alias }}/endpoint"
+      - "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}/broker/azure/endpoint"
+      - "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}/broker/microsoft/endpoint"
+      - "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}/broker/oidc/endpoint"
+
+  tasks:
+    - name: Validate required Azure credentials
+      ansible.builtin.assert:
+        that:
+          - azure_tenant_id | length > 0
+          - azure_subscription_id | length > 0
+        fail_msg: |
+          Missing required Azure credentials!
+          Please set these environment variables or pass them with -e:
+            - AZURE_TENANT_ID (or azure_tenant_id)
+            - AZURE_SUBSCRIPTION_ID (or azure_subscription_id)
+
+    - name: Display configuration parameters
+      ansible.builtin.debug:
+        msg:
+          - "Configuring Entra ID Group & OAuth for Keycloak Homelab Realm"
+          - "Group Name:     {{ homelab_group_name }}"
+          - "App Name:       {{ app_display_name }}"
+          - "Keycloak URL:   https://{{ keycloak_hostname }}"
+          - "Realm:          {{ keycloak_realm }}"
+          - "Tenant ID:      {{ azure_tenant_id }}"
+          - "Redirect URIs:  {{ oauth_redirect_uris | unique }}"
+
+    # Step 1: Create or verify Azure AD group homelab-user
+    - name: Check if homelab group already exists in Entra ID
+      ansible.builtin.command:
+        cmd: >
+          az ad group list
+          --display-name "{{ homelab_group_name }}"
+          --query "[0].id"
+          -o tsv
+      register: existing_group
+      changed_when: false
+      failed_when: false
+
+    - name: Create homelab group in Entra ID
+      ansible.builtin.command:
+        cmd: >
+          az ad group create
+          --display-name "{{ homelab_group_name }}"
+          --mail-nickname "{{ homelab_group_name }}"
+          --query "id"
+          -o tsv
+      register: group_create
+      when: existing_group.stdout | length == 0
+
+    - name: Set group ID fact
+      ansible.builtin.set_fact:
+        homelab_group_id: "{{ existing_group.stdout if existing_group.stdout | length > 0 else group_create.stdout }}"
+
+    - name: Display homelab-user group ID
+      ansible.builtin.debug:
+        msg: "Homelab Group ID ({{ homelab_group_name }}): {{ homelab_group_id }}"
+
+    # Step 2: Add all Entra ID users to homelab-user group
+    - name: Get all users from Entra ID
+      ansible.builtin.command:
+        cmd: az ad user list --query "[].id" -o tsv
+      register: all_users
+      changed_when: false
+
+    - name: Get existing members of homelab-user group
+      ansible.builtin.command:
+        cmd: az ad group member list --group "{{ homelab_group_id }}" --query "[].id" -o tsv
+      register: existing_members
+      changed_when: false
+
+    - name: Add users to homelab-user group
+      ansible.builtin.command:
+        cmd: az ad group member add --group "{{ homelab_group_id }}" --member-id "{{ item }}"
+      loop: "{{ all_users.stdout_lines }}"
+      when: item not in existing_members.stdout_lines
+      register: member_add
+      changed_when: true
+      failed_when: false
+
+    # Step 3: Check or create Azure AD App Registration for Homelab Realm
+    - name: Check if Entra ID app registration already exists
+      ansible.builtin.command:
+        cmd: >
+          az ad app list
+          --display-name "{{ app_display_name }}"
+          --query "[0].appId"
+          -o tsv
+      register: existing_app
+      changed_when: false
+      failed_when: false
+
+    - name: Create Entra ID app registration for Homelab Realm
+      ansible.builtin.command:
+        cmd: >
+          az ad app create
+          --display-name "{{ app_display_name }}"
+          --web-redirect-uris {{ oauth_redirect_uris | unique | join(' ') }}
+          --sign-in-audience AzureADMyOrg
+          --query "appId"
+          -o tsv
+      register: app_create
+      when: existing_app.stdout | length == 0
+
+    - name: Set app client ID
+      ansible.builtin.set_fact:
+        app_client_id: "{{ existing_app.stdout if existing_app.stdout | length > 0 else app_create.stdout }}"
+
+    - name: Display app client ID
+      ansible.builtin.debug:
+        msg: "App Client ID: {{ app_client_id }}"
+
+    - name: Update redirect URIs for existing app registration
+      ansible.builtin.command:
+        cmd: >
+          az ad app update
+          --id {{ app_client_id }}
+          --web-redirect-uris {{ oauth_redirect_uris | unique | join(' ') }}
+      when: existing_app.stdout | length > 0
+      changed_when: true
+
+    - name: Configure optional claims (email, groups, preferred_username)
+      ansible.builtin.command:
+        cmd: >
+          az ad app update
+          --id {{ app_client_id }}
+          --optional-claims '{
+            "idToken": [
+              {"name": "email", "essential": false},
+              {"name": "groups", "essential": false},
+              {"name": "preferred_username", "essential": false}
+            ],
+            "accessToken": [
+              {"name": "email", "essential": false},
+              {"name": "groups", "essential": false},
+              {"name": "preferred_username", "essential": false}
+            ]
+          }'
+      changed_when: true
+
+    # Step 4: Add API permissions (Microsoft Graph)
+    - name: Add Microsoft Graph User.Read permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions e1fe6dd8-ba31-4d61-89e7-88639da4683d=Scope
+      register: user_read_perm
+      changed_when: "'already exists' not in user_read_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph email permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0=Scope
+      register: email_perm
+      changed_when: "'already exists' not in email_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph openid permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 37f7f235-527c-4136-accd-4a02d197296e=Scope
+      register: openid_perm
+      changed_when: "'already exists' not in openid_perm.stderr"
+      failed_when: false
+
+    - name: Add Microsoft Graph profile permission
+      ansible.builtin.command:
+        cmd: >
+          az ad app permission add
+          --id {{ app_client_id }}
+          --api 00000003-0000-0000-c000-000000000000
+          --api-permissions 14dad69e-099b-42c9-810b-d002981feec1=Scope
+      register: profile_perm
+      changed_when: "'already exists' not in profile_perm.stderr"
+      failed_when: false
+
+    # Step 5: Create or reset client secret
+    - name: Create or reset client secret
+      ansible.builtin.command:
+        cmd: >
+          az ad app credential reset
+          --id {{ app_client_id }}
+          --display-name "Keycloak-Homelab-OAuth-Secret"
+          --years 2
+          --query "password"
+          -o tsv
+      register: client_secret
+      no_log: true
+
+    - name: Set client secret fact
+      ansible.builtin.set_fact:
+        oauth_client_secret: "{{ client_secret.stdout }}"
+      no_log: true
+
+    # Step 6: Create service principal if it doesn't exist
+    - name: Check if service principal exists
+      ansible.builtin.command:
+        cmd: >
+          az ad sp list
+          --filter "appId eq '{{ app_client_id }}'"
+          --query "[0].id"
+          -o tsv
+      register: existing_sp
+      changed_when: false
+      failed_when: false
+
+    - name: Create service principal
+      ansible.builtin.command:
+        cmd: az ad sp create --id {{ app_client_id }}
+      when: existing_sp.stdout | length == 0
+      register: sp_create
+      failed_when: false
+
+    # Step 7: Check OpenShift connection and create secret
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Ensure keycloak namespace exists
+      when: oc_check.resources is defined and oc_check.resources | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+
+    - name: Create or update Entra ID Secret in OpenShift for Homelab Realm
+      when: oc_check.resources is defined and oc_check.resources | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ keycloak_entraid_secret_name }}"
+            namespace: "{{ keycloak_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: keycloak
+              app.kubernetes.io/realm: "{{ keycloak_realm }}"
+              app.kubernetes.io/component: identity-provider
+          type: Opaque
+          stringData:
+            clientId: "{{ app_client_id }}"
+            clientSecret: "{{ oauth_client_secret }}"
+            tenantId: "{{ azure_tenant_id }}"
+            groupId: "{{ homelab_group_id }}"
+            groupName: "{{ homelab_group_name }}"
+            client-id: "{{ app_client_id }}"
+            client-secret: "{{ oauth_client_secret }}"
+            tenant-id: "{{ azure_tenant_id }}"
+            group-id: "{{ homelab_group_id }}"
+            group-name: "{{ homelab_group_name }}"
+            redirectUri: "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}/broker/{{ keycloak_idp_alias }}/endpoint"
+            issuer: "https://login.microsoftonline.com/{{ azure_tenant_id }}/v2.0"
+            authorizationUrl: "https://login.microsoftonline.com/{{ azure_tenant_id }}/oauth2/v2.0/authorize"
+            tokenUrl: "https://login.microsoftonline.com/{{ azure_tenant_id }}/oauth2/v2.0/token"
+            jwksUrl: "https://login.microsoftonline.com/{{ azure_tenant_id }}/discovery/v2.0/keys"
+            logoutUrl: "https://login.microsoftonline.com/{{ azure_tenant_id }}/oauth2/v2.0/logout"
+            userInfoUrl: "https://graph.microsoft.com/oidc/userinfo"
+      no_log: true
+
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "================================================================"
+          - "   Homelab Entra ID Group & App Registration Complete!          "
+          - "================================================================"
+          - ""
+          - "Entra ID Group:"
+          - "  Group Name:   {{ homelab_group_name }}"
+          - "  Group ID:     {{ homelab_group_id }}"
+          - "  Members Added: All {{ all_users.stdout_lines | length }} users"
+          - ""
+          - "Azure App Registration Details:"
+          - "  Display Name: {{ app_display_name }}"
+          - "  Client ID:    {{ app_client_id }}"
+          - "  Tenant ID:    {{ azure_tenant_id }}"
+          - ""
+          - "Cluster Secret:"
+          - "  Name:         {{ keycloak_entraid_secret_name }}"
+          - "  Namespace:    {{ keycloak_namespace }}"
+          - "================================================================"

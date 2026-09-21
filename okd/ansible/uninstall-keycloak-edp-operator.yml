@@ -1,0 +1,36 @@
+---
+# Ansible playbook to uninstall Keycloak EDP Operator via Helm
+# Usage: ansible-playbook -i inventory.yml uninstall-keycloak-edp-operator.yml
+
+- name: Uninstall Keycloak EDP Operator
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_name: "{{ lookup('env', 'KEYCLOAK_NAME') | default('keycloak', true) }}"
+    edp_helm_release: "{{ lookup('env', 'KEYCLOAK_EDP_OPERATOR_HELM_RELEASE') | default('keycloak-edp-operator', true) }}"
+
+  tasks:
+    - name: Remove EDP Keycloak CR
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1.edp.epam.com/v1
+        kind: Keycloak
+        name: "{{ keycloak_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      failed_when: false
+
+    - name: Uninstall Keycloak EDP Operator Helm release
+      ansible.builtin.command:
+        cmd: "helm uninstall {{ edp_helm_release }} --namespace {{ keycloak_namespace }} --wait --ignore-not-found"
+      register: edp_uninstall
+      changed_when: "'uninstalled' in edp_uninstall.stdout"
+      failed_when: false
+
+    - name: Display uninstall status
+      ansible.builtin.debug:
+        msg: "✅ Keycloak EDP Operator uninstalled from namespace {{ keycloak_namespace }}"

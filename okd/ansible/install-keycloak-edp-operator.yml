@@ -1,0 +1,174 @@
+---
+# Ansible playbook to install Keycloak EDP Operator via Helm and connect it to Keycloak
+# Usage: ansible-playbook -i inventory.yml install-keycloak-edp-operator.yml
+
+- name: Install Keycloak EDP Operator and Connect Keycloak Instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_name: "{{ lookup('env', 'KEYCLOAK_NAME') | default('keycloak', true) }}"
+    keycloak_hostname: "{{ lookup('env', 'KEYCLOAK_HOSTNAME') | default('keycloak.homelab.kubesoar.com', true) }}"
+    edp_helm_release: "{{ lookup('env', 'KEYCLOAK_EDP_OPERATOR_HELM_RELEASE') | default('keycloak-edp-operator', true) }}"
+    edp_helm_repo_name: "{{ lookup('env', 'KEYCLOAK_EDP_OPERATOR_HELM_REPO_NAME') | default('epamedp', true) }}"
+    edp_helm_repo_url: "{{ lookup('env', 'KEYCLOAK_EDP_OPERATOR_HELM_REPO_URL') | default('https://epam.github.io/edp-helm-charts/stable', true) }}"
+    edp_chart_version: "{{ lookup('env', 'KEYCLOAK_EDP_OPERATOR_CHART_VERSION') | default('1.35.0', true) }}"
+    keycloak_admin_secret: "{{ lookup('env', 'KEYCLOAK_ADMIN_SECRET') | default(keycloak_name + '-initial-admin', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure keycloak namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+
+    - name: Grant anyuid SCC to serviceaccounts in keycloak namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: system:openshift:scc:anyuid
+            namespace: "{{ keycloak_namespace }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:anyuid
+          subjects:
+            - kind: Group
+              name: "system:serviceaccounts:{{ keycloak_namespace }}"
+              apiGroup: rbac.authorization.k8s.io
+
+    - name: Add epamedp Helm repo
+      ansible.builtin.command:
+        cmd: "helm repo add {{ edp_helm_repo_name }} {{ edp_helm_repo_url }}"
+      register: edp_repo_add
+      changed_when: "'has been added' in edp_repo_add.stdout"
+      failed_when: false
+
+    - name: Update epamedp Helm repo
+      ansible.builtin.command:
+        cmd: "helm repo update {{ edp_helm_repo_name }}"
+      changed_when: false
+
+    - name: Build Helm command for Keycloak EDP Operator install
+      ansible.builtin.set_fact:
+        edp_helm_cmd: >-
+          helm upgrade --install {{ edp_helm_release }} {{ edp_helm_repo_name }}/keycloak-operator
+          --namespace {{ keycloak_namespace }}
+          --set name={{ edp_helm_release }}
+          --set enableWebhooks=true
+          --wait
+          --timeout 5m
+          {{ ('--version ' ~ edp_chart_version) if (edp_chart_version | length > 0) else '' }}
+
+    - name: Install or upgrade Keycloak EDP Operator Helm release
+      ansible.builtin.command:
+        cmd: "{{ edp_helm_cmd }}"
+      register: edp_install
+      changed_when: "'STATUS: deployed' in edp_install.stdout or 'STATUS: pending-upgrade' in edp_install.stdout"
+
+    - name: Wait for Keycloak EDP Operator deployment
+      ansible.builtin.command:
+        cmd: "oc rollout status deployment/{{ edp_helm_release }} -n {{ keycloak_namespace }} --timeout=300s"
+      changed_when: false
+
+    - name: Wait for EDP Keycloak CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: keycloaks.v1.edp.epam.com
+      register: edp_keycloak_crd
+      until: edp_keycloak_crd.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Wait for EDP KeycloakRealm CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: keycloakrealms.v1.edp.epam.com
+      register: edp_realm_crd
+      until: edp_realm_crd.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Wait for EDP KeycloakClient CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: keycloakclients.v1.edp.epam.com
+      register: edp_client_crd
+      until: edp_client_crd.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Verify Keycloak admin secret exists
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_admin_secret }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: admin_sec_check
+      until: admin_sec_check.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Create or update EDP Keycloak CR to connect operator to Keycloak instance
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1.edp.epam.com/v1
+          kind: Keycloak
+          metadata:
+            name: "{{ keycloak_name }}"
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            url: "http://keycloak-service.{{ keycloak_namespace }}.svc:80"
+            secret: "{{ keycloak_admin_secret }}"
+
+    - name: Wait for EDP Keycloak resource connection status
+      kubernetes.core.k8s_info:
+        api_version: v1.edp.epam.com/v1
+        kind: Keycloak
+        name: "{{ keycloak_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: edp_kc_res
+      until: edp_kc_res.resources | length > 0 and (edp_kc_res.resources[0].status.connected | default(false))
+      retries: 30
+      delay: 5
+
+    - name: Display Keycloak EDP Operator status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak EDP Operator installed and connected successfully!"
+          - "Release: {{ edp_helm_release }}"
+          - "Namespace: {{ keycloak_namespace }}"
+          - "Keycloak CR: {{ keycloak_name }}"
+          - "Connected: {{ edp_kc_res.resources[0].status.connected | default(false) }}"

@@ -1,0 +1,95 @@
+---
+# Ansible playbook to restart OpenBao pods and automatically unseal them
+# Usage: ansible-playbook -i inventory.yml restart-openbao.yml
+
+- name: Restart OpenBao Pods and Unseal
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    openbao_namespace: "{{ lookup('env', 'OPENBAO_NAMESPACE') | default('openbao', true) }}"
+    openbao_name: "{{ lookup('env', 'OPENBAO_NAME') | default('openbao', true) }}"
+    openbao_replicas: "{{ lookup('env', 'OPENBAO_REPLICAS') | default(3, true) | int }}"
+    openbao_unseal_secret: "{{ lookup('env', 'OPENBAO_UNSEAL_SECRET') | default('openbao-init-unseal', true) }}"
+
+  tasks:
+    - name: Ensure OpenBao namespace is labeled for Istio ambient mesh
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ openbao_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
+
+    - name: Retrieve unseal credentials from Kubernetes Secret
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_unseal_secret }}"
+        namespace: "{{ openbao_namespace }}"
+      register: unseal_sec_info
+      until: unseal_sec_info.resources | length > 0
+      retries: 20
+      delay: 3
+
+    - name: Extract unseal keys
+      ansible.builtin.set_fact:
+        unseal_key_1: "{{ unseal_sec_info.resources[0].data.unseal_key_1 | b64decode }}"
+        unseal_key_2: "{{ unseal_sec_info.resources[0].data.unseal_key_2 | b64decode }}"
+        unseal_key_3: "{{ unseal_sec_info.resources[0].data.unseal_key_3 | b64decode }}"
+      no_log: true
+
+    - name: Restart OpenBao StatefulSet
+      ansible.builtin.command:
+        cmd: "oc rollout restart statefulset/{{ openbao_name }} -n {{ openbao_namespace }}"
+      changed_when: true
+
+    - name: Wait for OpenBao pods to cycle and be in Running state
+      kubernetes.core.k8s_info:
+        kind: Pod
+        name: "{{ openbao_name }}-{{ item }}"
+        namespace: "{{ openbao_namespace }}"
+      loop: "{{ range(0, openbao_replicas | int) | list }}"
+      register: pod_status
+      until: pod_status.resources is defined and pod_status.resources | length > 0 and pod_status.resources[0].status.phase == 'Running'
+      retries: 40
+      delay: 5
+
+    - name: Give pods a short moment to initialize API listener
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Unseal each OpenBao replica
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-{{ item[0] }} -- bao operator unseal {{ item[1] }}"
+      loop: "{{ q('cartesian', range(0, openbao_replicas | int) | list, [unseal_key_1, unseal_key_2, unseal_key_3]) }}"
+      no_log: true
+      changed_when: true
+      failed_when: false
+
+    - name: Verify OpenBao status on leader
+      ansible.builtin.command:
+        cmd: "oc exec -n {{ openbao_namespace }} {{ openbao_name }}-0 -- bao status -format=json"
+      register: bao_status_raw
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: bao_status_raw.rc == 0 or bao_status_raw.rc == 2
+
+    - name: Parse and display OpenBao status
+      ansible.builtin.set_fact:
+        bao_status: "{{ bao_status_raw.stdout | from_json }}"
+
+    - name: Display OpenBao restart and ambient status
+      ansible.builtin.debug:
+        msg:
+          - "🎉 OpenBao pods restarted and unsealed successfully!"
+          - "Namespace: {{ openbao_namespace }} (Istio Ambient Enabled)"
+          - "Initialized: {{ bao_status.initialized }}"
+          - "Sealed: {{ bao_status.sealed }}"
+          - "HA Enabled: {{ bao_status.ha_enabled }}"

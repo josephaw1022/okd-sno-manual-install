@@ -1,0 +1,364 @@
+---
+# Ansible playbook to configure homelab realm in Keycloak with EDP operator and Entra ID IdP
+# Usage: ansible-playbook -i inventory.yml configure-keycloak-homelab-realm.yml
+
+- name: Configure Keycloak Homelab Realm and Entra ID Identity Provider
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    keycloak_hostname: "{{ lookup('env', 'KEYCLOAK_HOSTNAME') | default('keycloak.homelab.' + keycloak_base_domain, true) }}"
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_name: "{{ lookup('env', 'KEYCLOAK_NAME') | default('keycloak', true) }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_HOMELAB_REALM') | default('homelab', true) }}"
+    keycloak_entraid_secret_name: "{{ lookup('env', 'KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME') | default('keycloak-homelab-entraid-secret', true) }}"
+    keycloak_admin_secret: "{{ lookup('env', 'KEYCLOAK_ADMIN_SECRET') | default(keycloak_name + '-initial-admin', true) }}"
+    keycloak_idp_alias: "{{ lookup('env', 'KEYCLOAK_IDP_ALIAS') | default('azure', true) }}"
+    keycloak_idp_display_name: "{{ lookup('env', 'KEYCLOAK_IDP_DISPLAY_NAME') | default('Microsoft Entra ID', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Apply EDP KeycloakRealm CR for homelab realm
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1.edp.epam.com/v1
+          kind: KeycloakRealm
+          metadata:
+            name: "{{ keycloak_realm }}"
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            realmName: "{{ keycloak_realm }}"
+            keycloakRef:
+              kind: Keycloak
+              name: "{{ keycloak_name }}"
+
+    - name: Get Keycloak initial admin credentials
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_admin_secret }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: kc_admin_sec
+      until: kc_admin_sec.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Extract Keycloak admin credentials
+      ansible.builtin.set_fact:
+        kc_admin_user: "{{ (kc_admin_sec.resources[0].data.username | b64decode) if kc_admin_sec.resources[0].data.username is defined else 'admin' }}"
+        kc_admin_pass: "{{ kc_admin_sec.resources[0].data.password | b64decode }}"
+      no_log: true
+
+    - name: Wait for Keycloak server to be ready
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/realms/master"
+        method: GET
+        validate_certs: false
+        status_code: 200
+      register: kc_health_check
+      until: kc_health_check.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Authenticate against Keycloak Admin API
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: admin-cli
+          grant_type: password
+          username: "{{ kc_admin_user }}"
+          password: "{{ kc_admin_pass }}"
+        validate_certs: false
+        status_code: [200, 400, 401, 403, 500]
+      register: kc_token_response
+
+    - name: Fail if token authentication was unsuccessful
+      ansible.builtin.fail:
+        msg: |
+          Failed to authenticate to Keycloak Admin API!
+          Status: {{ kc_token_response.status }}
+      when: kc_token_response.status != 200
+
+    - name: Check if homelab realm exists in Keycloak
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+        validate_certs: false
+        status_code: [200, 404]
+      register: realm_check
+
+    - name: Create homelab realm via Admin API if not yet present
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          realm: "{{ keycloak_realm }}"
+          enabled: true
+          displayName: "Homelab"
+          rememberMe: true
+          loginWithEmailAllowed: true
+          resetPasswordAllowed: true
+          registrationAllowed: false
+        validate_certs: false
+        status_code: [200, 201, 409]
+      when: realm_check.status == 404
+
+    - name: Ensure homelab-user role exists in homelab realm
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/roles"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "homelab-user"
+          description: "Default role for all homelab users"
+        validate_certs: false
+        status_code: [200, 201, 409]
+
+    - name: Get homelab Entra ID secret from Kubernetes
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_entraid_secret_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: entraid_sec_res
+      failed_when: false
+
+    - name: Configure Entra ID IdP block in homelab realm
+      when: entraid_sec_res.resources is defined and entraid_sec_res.resources | length > 0
+      block:
+        - name: Extract Entra ID credentials
+          ansible.builtin.set_fact:
+            kc_entraid_client_id: "{{ (entraid_sec_res.resources[0].data['client-id'] | default(entraid_sec_res.resources[0].data['clientId'], true)) | b64decode }}"
+            kc_entraid_client_secret: "{{ (entraid_sec_res.resources[0].data['client-secret'] | default(entraid_sec_res.resources[0].data['clientSecret'], true)) | b64decode }}"
+            kc_entraid_tenant_id: "{{ (entraid_sec_res.resources[0].data['tenant-id'] | default(entraid_sec_res.resources[0].data['tenantId'], true)) | b64decode }}"
+          no_log: true
+
+        - name: Check if Entra ID IdP exists in homelab realm
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+            validate_certs: false
+            status_code: [200, 404]
+          register: existing_idp
+
+        - name: Define Entra ID IdP payload for homelab realm
+          ansible.builtin.set_fact:
+            kc_idp_payload:
+              alias: "{{ keycloak_idp_alias }}"
+              displayName: "{{ keycloak_idp_display_name }}"
+              providerId: oidc
+              enabled: true
+              trustEmail: true
+              storeToken: false
+              addReadTokenRoleOnCreate: false
+              authenticateByDefault: false
+              linkOnly: false
+              firstBrokerLoginFlowAlias: "first broker login"
+              config:
+                clientId: "{{ kc_entraid_client_id }}"
+                clientSecret: "{{ kc_entraid_client_secret }}"
+                authorizationUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/oauth2/v2.0/authorize"
+                tokenUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/oauth2/v2.0/token"
+                logoutUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/oauth2/v2.0/logout"
+                issuer: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/v2.0"
+                jwksUrl: "https://login.microsoftonline.com/{{ kc_entraid_tenant_id }}/discovery/v2.0/keys"
+                userInfoUrl: "https://graph.microsoft.com/oidc/userinfo"
+                clientAuthMethod: "client_secret_post"
+                defaultScope: "openid profile email"
+                validateSignature: "true"
+                useJwksUrl: "true"
+                syncMode: "IMPORT"
+          no_log: true
+
+        - name: Create Entra ID IdP in homelab realm
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body: "{{ kc_idp_payload }}"
+            validate_certs: false
+            status_code: [200, 201]
+          when: existing_idp.status == 404
+
+        - name: Update Entra ID IdP in homelab realm
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}"
+            method: PUT
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body: "{{ kc_idp_payload }}"
+            validate_certs: false
+            status_code: [200, 204]
+          when: existing_idp.status == 200
+
+        - name: Fetch existing IdP mappers in homelab realm
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+            validate_certs: false
+            status_code: 200
+          register: existing_mappers
+
+        - name: Delete invalid or outdated mappers if present
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers/{{ item.id }}"
+            method: DELETE
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+            validate_certs: false
+            status_code: [200, 204, 404]
+          loop: "{{ existing_mappers.json }}"
+          when: item.identityProviderMapper == 'oidc-username-template-mapper' or item.name == 'fullName'
+
+        - name: Refresh existing IdP mappers list
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+            validate_certs: false
+            status_code: 200
+          register: refreshed_mappers
+
+        - name: Configure email attribute mapper
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body:
+              name: "email"
+              identityProviderAlias: "{{ keycloak_idp_alias }}"
+              identityProviderMapper: "oidc-user-attribute-idp-mapper"
+              config:
+                user.attribute: "email"
+                claim: "email"
+                syncMode: "INHERIT"
+            validate_certs: false
+            status_code: [200, 201, 409]
+          when: "'email' not in (refreshed_mappers.json | map(attribute='name') | list)"
+
+        - name: Configure username attribute mapper
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body:
+              name: "username"
+              identityProviderAlias: "{{ keycloak_idp_alias }}"
+              identityProviderMapper: "oidc-username-idp-mapper"
+              config:
+                template: "${CLAIM.preferred_username}"
+                target: "LOCAL"
+                syncMode: "INHERIT"
+            validate_certs: false
+            status_code: [200, 201, 409]
+          when: "'username' not in (refreshed_mappers.json | map(attribute='name') | list)"
+
+        - name: Configure first name attribute mapper
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body:
+              name: "firstName"
+              identityProviderAlias: "{{ keycloak_idp_alias }}"
+              identityProviderMapper: "oidc-user-attribute-idp-mapper"
+              config:
+                user.attribute: "firstName"
+                claim: "given_name"
+                syncMode: "INHERIT"
+            validate_certs: false
+            status_code: [200, 201, 409]
+          when: "'firstName' not in (refreshed_mappers.json | map(attribute='name') | list)"
+
+        - name: Configure last name attribute mapper
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body:
+              name: "lastName"
+              identityProviderAlias: "{{ keycloak_idp_alias }}"
+              identityProviderMapper: "oidc-user-attribute-idp-mapper"
+              config:
+                user.attribute: "lastName"
+                claim: "family_name"
+                syncMode: "INHERIT"
+            validate_certs: false
+            status_code: [200, 201, 409]
+          when: "'lastName' not in (refreshed_mappers.json | map(attribute='name') | list)"
+
+        - name: Configure homelab-user role mapper
+          ansible.builtin.uri:
+            url: "https://{{ keycloak_hostname }}/admin/realms/{{ keycloak_realm }}/identity-provider/instances/{{ keycloak_idp_alias }}/mappers"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ kc_token_response.json.access_token }}"
+              Content-Type: application/json
+            body_format: json
+            body:
+              name: "homelab-user-role"
+              identityProviderAlias: "{{ keycloak_idp_alias }}"
+              identityProviderMapper: "oidc-hardcoded-role-idp-mapper"
+              config:
+                role: "homelab-user"
+                syncMode: "FORCE"
+            validate_certs: false
+            status_code: [200, 201, 409]
+          when: "'homelab-user-role' not in (refreshed_mappers.json | map(attribute='name') | list)"
+
+    - name: Display Homelab Realm status
+      ansible.builtin.debug:
+        msg:
+          - "🎉 Homelab realm configured successfully!"
+          - "Realm Name:   {{ keycloak_realm }}"
+          - "Keycloak URL: https://{{ keycloak_hostname }}"
+          - "IdP Status:   {{ 'Configured with Microsoft Entra ID' if (entraid_sec_res.resources is defined and entraid_sec_res.resources | length > 0) else 'Pending Entra ID setup (run make setup-keycloak-homelab-entraid)' }}"

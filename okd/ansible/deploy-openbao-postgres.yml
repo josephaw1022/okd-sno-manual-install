@@ -1,0 +1,159 @@
+---
+# Ansible playbook to deploy CloudNativePG PostgreSQL Cluster for OpenBao
+# Usage: ansible-playbook -i inventory.yml deploy-openbao-postgres.yml
+
+- name: Deploy CloudNativePG PostgreSQL Cluster for OpenBao
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    openbao_namespace: "{{ lookup('env', 'OPENBAO_NAMESPACE') | default('openbao', true) }}"
+    openbao_postgres_name: "{{ lookup('env', 'OPENBAO_POSTGRES_NAME') | default('openbao-postgres-cluster', true) }}"
+    openbao_postgres_instances: "{{ lookup('env', 'OPENBAO_POSTGRES_INSTANCES') | default(3, true) | int }}"
+    openbao_postgres_database: "{{ lookup('env', 'OPENBAO_DB_NAME') | default('openbao', true) }}"
+    openbao_postgres_owner: "{{ lookup('env', 'OPENBAO_DB_USER') | default('openbao', true) }}"
+    openbao_postgres_storage_size: "{{ lookup('env', 'OPENBAO_POSTGRES_STORAGE_SIZE') | default('5Gi', true) }}"
+    openbao_postgres_storage_class: "{{ lookup('env', 'OPENBAO_POSTGRES_STORAGE_CLASS') | default('', true) }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure openbao namespace exists with proper labels
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ openbao_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
+              pod-security.kubernetes.io/enforce: privileged
+              pod-security.kubernetes.io/audit: privileged
+              pod-security.kubernetes.io/warn: privileged
+
+    - name: Grant anyuid SCC to serviceaccounts in openbao namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: system:openshift:scc:anyuid
+            namespace: "{{ openbao_namespace }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:anyuid
+          subjects:
+            - kind: Group
+              name: "system:serviceaccounts:{{ openbao_namespace }}"
+              apiGroup: rbac.authorization.k8s.io
+
+    - name: Grant cnpg-operator SCC to serviceaccounts in openbao namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: system:openshift:scc:cnpg-operator
+            namespace: "{{ openbao_namespace }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:cnpg-operator
+          subjects:
+            - kind: Group
+              name: "system:serviceaccounts:{{ openbao_namespace }}"
+              apiGroup: rbac.authorization.k8s.io
+
+    - name: Check available storage classes
+      kubernetes.core.k8s_info:
+        kind: StorageClass
+      register: sc_info
+
+    - name: Check if CNPG app secret already exists
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_postgres_name }}-app"
+        namespace: "{{ openbao_namespace }}"
+      register: existing_app_secret
+
+    - name: Create CNPG app secret if it does not exist
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ openbao_postgres_name }}-app"
+            namespace: "{{ openbao_namespace }}"
+          type: kubernetes.io/basic-auth
+          stringData:
+            username: "{{ openbao_postgres_owner }}"
+            user: "{{ openbao_postgres_owner }}"
+            password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+            database: "{{ openbao_postgres_database }}"
+      when: existing_app_secret.resources | length == 0
+
+    - name: Build CNPG Cluster manifest
+      ansible.builtin.set_fact:
+        cnpg_cluster_manifest: |
+          apiVersion: postgresql.cnpg.io/v1
+          kind: Cluster
+          metadata:
+            name: {{ openbao_postgres_name }}
+            namespace: {{ openbao_namespace }}
+          spec:
+            instances: {{ openbao_postgres_instances | int }}
+            bootstrap:
+              initdb:
+                database: {{ openbao_postgres_database }}
+                owner: {{ openbao_postgres_owner }}
+                secret:
+                  name: {{ openbao_postgres_name }}-app
+            storage:
+              size: {{ openbao_postgres_storage_size }}
+              {% if openbao_postgres_storage_class | length > 0 %}
+              storageClass: {{ openbao_postgres_storage_class }}
+              {% endif %}
+
+    - name: Apply CloudNativePG Cluster for OpenBao
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ cnpg_cluster_manifest | from_yaml }}"
+
+    - name: Wait for CNPG app secret to be available
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_postgres_name }}-app"
+        namespace: "{{ openbao_namespace }}"
+      register: cnpg_secret
+      until: cnpg_secret.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Display OpenBao Postgres deployment status
+      ansible.builtin.debug:
+        msg:
+          - "✅ OpenBao Postgres Cluster deployed successfully!"
+          - "Cluster: {{ openbao_postgres_name }}"
+          - "Namespace: {{ openbao_namespace }}"
+          - "Database: {{ openbao_postgres_database }}"
+          - "Secret: {{ openbao_postgres_name }}-app"

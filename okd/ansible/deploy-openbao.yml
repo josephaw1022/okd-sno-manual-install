@@ -1,0 +1,222 @@
+---
+# Ansible playbook to deploy OpenBao HA via Helm with PostgreSQL backend
+# Usage: ansible-playbook -i inventory.yml deploy-openbao.yml
+
+- name: Deploy OpenBao HA via Helm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    openbao_namespace: "{{ lookup('env', 'OPENBAO_NAMESPACE') | default('openbao', true) }}"
+    openbao_name: "{{ lookup('env', 'OPENBAO_NAME') | default('openbao', true) }}"
+    openbao_replicas: "{{ lookup('env', 'OPENBAO_REPLICAS') | default(3, true) | int }}"
+    openbao_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    openbao_hostname: "{{ lookup('env', 'OPENBAO_HOSTNAME') | default('openbao.homelab.' + openbao_base_domain, true) }}"
+    openbao_ingress_class: "{{ lookup('env', 'OPENBAO_INGRESS_CLASS') | default('istio', true) }}"
+    openbao_tls_secret: "{{ lookup('env', 'OPENBAO_TLS_SECRET') | default('openbao-tls', true) }}"
+    openbao_cluster_issuer: "{{ lookup('env', 'OPENBAO_CLUSTER_ISSUER') | default('cloudflare-dns01', true) }}"
+    openbao_postgres_name: "{{ lookup('env', 'OPENBAO_POSTGRES_NAME') | default('openbao-postgres-cluster', true) }}"
+    openbao_db_name: "{{ lookup('env', 'OPENBAO_DB_NAME') | default('openbao', true) }}"
+    openbao_helm_repo_name: "{{ lookup('env', 'OPENBAO_HELM_REPO_NAME') | default('openbao', true) }}"
+    openbao_helm_repo_url: "{{ lookup('env', 'OPENBAO_HELM_REPO_URL') | default('https://openbao.github.io/openbao-helm', true) }}"
+    openbao_chart_version: "{{ lookup('env', 'OPENBAO_CHART_VERSION') | default('0.29.5', true) }}"
+
+  tasks:
+    - name: Verify Helm is installed
+      ansible.builtin.command:
+        cmd: helm version --short
+      changed_when: false
+
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure openbao namespace exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ openbao_namespace }}"
+            labels:
+              istio.io/dataplane-mode: ambient
+              pod-security.kubernetes.io/enforce: privileged
+
+    - name: Grant anyuid SCC to serviceaccounts in openbao namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: system:openshift:scc:anyuid
+            namespace: "{{ openbao_namespace }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:openshift:scc:anyuid
+          subjects:
+            - kind: Group
+              name: "system:serviceaccounts:{{ openbao_namespace }}"
+              apiGroup: rbac.authorization.k8s.io
+
+    - name: Get CNPG DB credentials from secret
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_postgres_name }}-app"
+        namespace: "{{ openbao_namespace }}"
+      register: db_sec
+      until: db_sec.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Extract DB credentials
+      ansible.builtin.set_fact:
+        db_user: "{{ (db_sec.resources[0].data.username | default(db_sec.resources[0].data.user, true)) | b64decode }}"
+        db_pass: "{{ db_sec.resources[0].data.password | b64decode }}"
+        db_host: "{{ openbao_postgres_name }}-rw"
+      no_log: true
+
+    - name: Add openbao Helm repo
+      ansible.builtin.command:
+        cmd: "helm repo add {{ openbao_helm_repo_name }} {{ openbao_helm_repo_url }}"
+      register: helm_add
+      changed_when: "'has been added' in helm_add.stdout"
+      failed_when: false
+
+    - name: Update openbao Helm repo
+      ansible.builtin.command:
+        cmd: "helm repo update {{ openbao_helm_repo_name }}"
+      changed_when: false
+
+    - name: Create temporary values file for OpenBao
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .yaml
+      register: openbao_values_file
+
+    - name: Write OpenBao Helm values
+      ansible.builtin.copy:
+        dest: "{{ openbao_values_file.path }}"
+        mode: '0600'
+        content: |
+          global:
+            enabled: true
+            tlsDisable: true
+            openshift: true
+          injector:
+            enabled: false
+          server:
+            ha:
+              enabled: true
+              replicas: {{ openbao_replicas | int }}
+              config: |
+                ui = true
+
+                listener "tcp" {
+                  tls_disable = 1
+                  address = "[::]:8200"
+                  cluster_address = "[::]:8201"
+                }
+
+                storage "postgresql" {
+                  connection_url = "postgresql://{{ db_user }}:{{ db_pass }}@{{ db_host }}:5432/{{ openbao_db_name }}?sslmode=disable"
+                  table = "vault_kv_store"
+                  ha_enabled = "true"
+                  ha_table = "vault_ha_locks"
+                }
+
+                service_registration "kubernetes" {}
+            ingress:
+              enabled: true
+              ingressClassName: {{ openbao_ingress_class }}
+              annotations:
+                cert-manager.io/cluster-issuer: {{ openbao_cluster_issuer }}
+                external-dns.alpha.kubernetes.io/hostname: {{ openbao_hostname }}
+              hosts:
+                - host: {{ openbao_hostname }}
+                  paths: []
+              tls:
+                - secretName: {{ openbao_tls_secret }}
+                  hosts:
+                    - {{ openbao_hostname }}
+          ui:
+            enabled: true
+            serviceType: ClusterIP
+      no_log: true
+
+    - name: Install or upgrade OpenBao Helm release
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install {{ openbao_name }} {{ openbao_helm_repo_name }}/openbao
+          --namespace {{ openbao_namespace }}
+          -f {{ openbao_values_file.path }}
+          --wait=false
+          {{ ('--version ' ~ openbao_chart_version) if (openbao_chart_version | length > 0) else '' }}
+      register: openbao_install
+      changed_when: "'STATUS: deployed' in openbao_install.stdout or 'STATUS: pending-upgrade' in openbao_install.stdout"
+
+    - name: Remove temporary values file
+      ansible.builtin.file:
+        path: "{{ openbao_values_file.path }}"
+        state: absent
+      when: openbao_values_file.path is defined
+
+    - name: Wait for OpenBao TLS Secret to be issued
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ openbao_tls_secret }}"
+        namespace: "{{ openbao_namespace }}"
+      register: tls_sec_info
+      until: tls_sec_info.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Sync TLS Secret to istio-ingress namespace
+      when: openbao_ingress_class == 'istio' and tls_sec_info.resources | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ openbao_tls_secret }}"
+            namespace: istio-ingress
+          type: kubernetes.io/tls
+          data: "{{ tls_sec_info.resources[0].data }}"
+
+    - name: Wait for OpenBao statefulset to exist
+      kubernetes.core.k8s_info:
+        kind: StatefulSet
+        name: "{{ openbao_name }}"
+        namespace: "{{ openbao_namespace }}"
+      register: sts_info
+      until: sts_info.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Display OpenBao deployment status
+      ansible.builtin.debug:
+        msg:
+          - "✅ OpenBao deployed successfully!"
+          - "Name:        {{ openbao_name }}"
+          - "Namespace:   {{ openbao_namespace }}"
+          - "Hostname:    https://{{ openbao_hostname }}"
+          - "Storage:     PostgreSQL ({{ db_host }}:5432/{{ openbao_db_name }})"
+          - "Replicas:    {{ openbao_replicas }}"
+          - "TLS Secret:  {{ openbao_tls_secret }}"
+          - "Next Step:   Run 'make init-openbao' to initialize and unseal OpenBao"
