@@ -136,6 +136,23 @@
       register: ext_result
       changed_when: false
 
+    - name: Ensure clair database exists on PostgreSQL
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} psql -U {{ pg_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'clair'"
+      register: clair_db_check
+      changed_when: false
+
+    - name: Create clair database if not exists
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} psql -U {{ pg_user }} -d postgres -c "CREATE DATABASE clair;"
+      when: clair_db_check.stdout | trim == ""
+      changed_when: true
+
+    - name: Ensure uuid-ossp and pgcrypto extensions exist in clair database
+      ansible.builtin.command:
+        cmd: sudo podman exec {{ pg_container_name }} psql -U {{ pg_user }} -d clair -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+      changed_when: false
+
     - name: Display PostgreSQL status
       ansible.builtin.debug:
         msg:

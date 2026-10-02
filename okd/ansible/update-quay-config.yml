@@ -12,6 +12,7 @@
     pg_database: "{{ quay_postgres_db | default('quay') }}"
     default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
     default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
+    default_clair_psk_base64: "azhzX2hvbWVsYWJfcXVheV9jbGFpcl9wc2tfc2VjcmV0X2tleV8xMjM0NTY3ODkwYWJjZGVm"
 
   tasks:
     - name: Check if existing config.yaml exists
@@ -62,6 +63,12 @@
             - "30d"
             - "60d"
             - "90d"
+
+          # Security Scanner (Clair)
+          FEATURE_SECURITY_SCANNER: true
+          SECURITY_SCANNER_V4_ENDPOINT: "http://quay-clair.kubesoar.com:6060"
+          SECURITY_SCANNER_V4_PSK: "{{ lookup('env', 'CLAIR_PSK_BASE64') | default(default_clair_psk_base64, true) }}"
+          SECURITY_SCANNER_INDEXING_INTERVAL: 30
 
           SUPER_USERS:
             - jwhiteaker

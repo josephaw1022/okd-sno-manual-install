@@ -13,6 +13,9 @@
       - name: quay-valkey
         ip: 192.168.1.31
         domain: quay-valkey.kubesoar.com
+      - name: quay-clair
+        ip: 192.168.1.34
+        domain: quay-clair.kubesoar.com
       - name: quay-registry
         ip: 192.168.1.32
         domain: quay-registry.kubesoar.com
@@ -48,6 +51,13 @@
       changed_when: false
       failed_when: valkey_test.stdout != 'PONG'
 
+    - name: Test Clair security scanner health endpoint
+      ansible.builtin.command:
+        cmd: "sudo podman exec quay-clair curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6061/healthz"
+      register: clair_health_code
+      changed_when: false
+      failed_when: clair_health_code.stdout != '200'
+
     - name: Test internal Quay registry health endpoint
       ansible.builtin.command:
         cmd: "sudo podman exec quay-registry curl -k -s -o /dev/null -w '%{http_code}' https://127.0.0.1:8443/health/instance"
@@ -57,7 +67,7 @@
 
     - name: Test Nginx HTTP to HTTPS redirect
       ansible.builtin.command:
-        cmd: "curl -s -o /dev/null -w '%{http_code}' http://quay.kubesoar.com/"
+        cmd: "curl --resolve quay.kubesoar.com:80:192.168.1.33 -s -o /dev/null -w '%{http_code}' http://quay.kubesoar.com/"
       delegate_to: localhost
       register: nginx_http_redirect
       changed_when: false
@@ -65,7 +75,7 @@
 
     - name: Test Nginx HTTPS endpoint
       ansible.builtin.command:
-        cmd: "curl -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/health/instance"
+        cmd: "curl --resolve quay.kubesoar.com:443:192.168.1.33 -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/health/instance"
       delegate_to: localhost
       register: nginx_https_health
       changed_when: false
@@ -73,7 +83,7 @@
 
     - name: Test Registry V2 API endpoint via HTTPS
       ansible.builtin.command:
-        cmd: "curl -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/v2/"
+        cmd: "curl --resolve quay.kubesoar.com:443:192.168.1.33 -k -s -o /dev/null -w '%{http_code}' https://quay.kubesoar.com/v2/"
       delegate_to: localhost
       register: registry_v2_code
       changed_when: false
@@ -81,7 +91,7 @@
 
     - name: Query Quay API discovery for Proxy Cache endpoint
       ansible.builtin.command:
-        cmd: "curl -k -s https://quay.kubesoar.com/api/v1/discovery"
+        cmd: "curl --resolve quay.kubesoar.com:443:192.168.1.33 -k -s https://quay.kubesoar.com/api/v1/discovery"
       delegate_to: localhost
       register: quay_discovery_raw
       changed_when: false
@@ -99,16 +109,19 @@
           - "Container Statuses:"
           - "  quay-postgres : {{ container_statuses.results[0].stdout }} (Health: {{ health_statuses.results[0].stdout }})"
           - "  quay-valkey   : {{ container_statuses.results[1].stdout }} (Health: {{ health_statuses.results[1].stdout }})"
-          - "  quay-registry : {{ container_statuses.results[2].stdout }} (Health: {{ health_statuses.results[2].stdout }})"
-          - "  quay-nginx    : {{ container_statuses.results[3].stdout }} (Health: {{ health_statuses.results[3].stdout }})"
+          - "  quay-clair    : {{ container_statuses.results[2].stdout }} (Health: {{ health_statuses.results[2].stdout }})"
+          - "  quay-registry : {{ container_statuses.results[3].stdout }} (Health: {{ health_statuses.results[3].stdout }})"
+          - "  quay-nginx    : {{ container_statuses.results[4].stdout }} (Health: {{ health_statuses.results[4].stdout }})"
           - ""
           - "Endpoints & Checks:"
           - "  PostgreSQL Ping       : {{ pg_test.stdout }}"
           - "  Valkey Ping           : {{ valkey_test.stdout }}"
+          - "  Clair Healthz         : HTTP {{ clair_health_code.stdout }}"
           - "  Quay Internal Health  : HTTP {{ quay_internal_http.stdout }}"
           - "  Nginx HTTP Redirect   : HTTP {{ nginx_http_redirect.stdout }} (redirects to HTTPS)"
           - "  Nginx HTTPS Health    : HTTP {{ nginx_https_health.stdout }} (SSL termination)"
           - "  Registry V2 API       : HTTP {{ registry_v2_code.stdout }}"
+          - "  Security Scanner      : Enabled (FEATURE_SECURITY_SCANNER=true, Clair v4)"
           - "  Proxy Cache API       : {{ 'Enabled (FEATURE_PROXY_CACHE=true)' if proxy_cache_available else 'Disabled' }}"
           - ""
           - "Registry URL: https://quay.kubesoar.com"

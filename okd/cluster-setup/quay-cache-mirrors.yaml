@@ -1,0 +1,29 @@
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: quay-and-dockerhub-digest-mirrors
+spec:
+  imageDigestMirrors:
+    - source: docker.io
+      mirrors:
+        - quay.kubesoar.com/dockerhub-cache
+      mirrorSourcePolicy: AllowContactingSource
+    - source: quay.io
+      mirrors:
+        - quay.kubesoar.com/quay-cache
+      mirrorSourcePolicy: AllowContactingSource
+---
+apiVersion: config.openshift.io/v1
+kind: ImageTagMirrorSet
+metadata:
+  name: quay-and-dockerhub-tag-mirrors
+spec:
+  imageTagMirrors:
+    - source: docker.io
+      mirrors:
+        - quay.kubesoar.com/dockerhub-cache
+      mirrorSourcePolicy: AllowContactingSource
+    - source: quay.io
+      mirrors:
+        - quay.kubesoar.com/quay-cache
+      mirrorSourcePolicy: AllowContactingSource

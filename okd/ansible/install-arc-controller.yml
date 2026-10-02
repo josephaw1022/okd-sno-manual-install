@@ -12,7 +12,7 @@
   vars:
     arc_namespace: "{{ lookup('env', 'ARC_NAMESPACE') | default('github-arc', true) }}"
     arc_helm_release_name: "{{ lookup('env', 'ARC_HELM_RELEASE') | default('arc', true) }}"
-    arc_chart_version: "{{ lookup('env', 'ARC_CHART_VERSION') | default('0.14.2', true) }}"
+    arc_chart_version: "{{ lookup('env', 'ARC_CHART_VERSION') | default('0.15.0', true) }}"
     arc_chart_oci: "oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller"
 
   tasks:

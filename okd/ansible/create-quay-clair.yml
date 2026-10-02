@@ -1,0 +1,186 @@
+---
+# Ansible playbook to create Clair security scanner container for Quay on laptop-server
+# Usage: ansible-playbook -i inventory.yml create-quay-clair.yml
+
+- name: Create Clair container for Quay image vulnerability scanning
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  vars:
+    clair_container_name: quay-clair
+    clair_ip: 192.168.1.34
+    clair_port: 6060
+    clair_introspection_port: 6061
+    clair_config_dir: /opt/quay-clair/config
+    pg_user: "{{ quay_postgres_user | default('quay') }}"
+    pg_password: "{{ quay_postgres_password | default('quaypass') }}"
+    pg_database: "{{ quay_clair_postgres_db | default('clair') }}"
+    pg_host: quay-postgres.kubesoar.com
+    pg_port: 5432
+    lb_gateway: 192.168.1.1
+    lb_subnet: 192.168.1.0/24
+    macvlan_network_name: quay-net
+    dns_server: 192.168.1.5
+    default_clair_psk_base64: "azhzX2hvbWVsYWJfcXVheV9jbGFpcl9wc2tfc2VjcmV0X2tleV8xMjM0NTY3ODkwYWJjZGVm"
+    clair_psk_base64: "{{ lookup('env', 'CLAIR_PSK_BASE64') | default(default_clair_psk_base64, true) }}"
+    clair_image: "{{ lookup('env', 'CLAIR_IMAGE') | default('quay.io/projectquay/clair:4.9.0', true) }}"
+
+  tasks:
+    - name: Find LAN interface for 192.168.1.x
+      ansible.builtin.shell:
+        cmd: |
+          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+      register: lan_interface
+      changed_when: false
+
+    - name: Set macvlan parent interface
+      ansible.builtin.set_fact:
+        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+
+    - name: Check if macvlan network exists
+      ansible.builtin.command:
+        cmd: sudo podman network exists {{ macvlan_network_name }}
+      register: network_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create macvlan network
+      ansible.builtin.command:
+        cmd: >
+          sudo podman network create
+          --driver macvlan
+          --opt parent={{ macvlan_interface }}
+          --subnet {{ lb_subnet }}
+          --gateway {{ lb_gateway }}
+          {{ macvlan_network_name }}
+      when: network_exists.rc != 0
+
+    - name: Ensure clair database exists on PostgreSQL
+      ansible.builtin.command:
+        cmd: sudo podman exec quay-postgres psql -U {{ pg_user }} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '{{ pg_database }}'"
+      register: clair_db_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create clair database if not exists
+      ansible.builtin.command:
+        cmd: sudo podman exec quay-postgres psql -U {{ pg_user }} -d postgres -c "CREATE DATABASE {{ pg_database }};"
+      when: clair_db_check.stdout is defined and clair_db_check.stdout | trim == ""
+      changed_when: true
+      failed_when: false
+
+    - name: Ensure uuid-ossp and pgcrypto extensions exist in clair database
+      ansible.builtin.command:
+        cmd: sudo podman exec quay-postgres psql -U {{ pg_user }} -d {{ pg_database }} -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure Clair configuration directory exists
+      ansible.builtin.file:
+        path: "{{ clair_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Clair configuration config.yaml
+      ansible.builtin.copy:
+        dest: "{{ clair_config_dir }}/config.yaml"
+        mode: '0644'
+        content: |
+          http_listen_addr: ":{{ clair_port }}"
+          introspection_addr: ":{{ clair_introspection_port }}"
+          log_level: "info"
+
+          indexer:
+            connstring: "host={{ pg_host }} port={{ pg_port }} dbname={{ pg_database }} user={{ pg_user }} password={{ pg_password }} sslmode=disable"
+            scanlock_retry: 10
+            layer_scan_concurrency: 5
+            migrations: true
+
+          matcher:
+            connstring: "host={{ pg_host }} port={{ pg_port }} dbname={{ pg_database }} user={{ pg_user }} password={{ pg_password }} sslmode=disable"
+            indexer_addr: "http://quay-clair.kubesoar.com:{{ clair_port }}/"
+            migrations: true
+            period: "30m"
+
+          notifier:
+            connstring: "host={{ pg_host }} port={{ pg_port }} dbname={{ pg_database }} user={{ pg_user }} password={{ pg_password }} sslmode=disable"
+            indexer_addr: "http://quay-clair.kubesoar.com:{{ clair_port }}/"
+            matcher_addr: "http://quay-clair.kubesoar.com:{{ clair_port }}/"
+            migrations: true
+
+          auth:
+            psk:
+              key: "{{ clair_psk_base64 }}"
+              iss:
+                - "quay"
+
+    - name: Remove any existing Clair container to ensure clean config apply
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ clair_container_name }}
+      failed_when: false
+      changed_when: false
+
+    - name: Check if Clair container exists
+      ansible.builtin.command:
+        cmd: sudo podman container exists {{ clair_container_name }}
+      register: container_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start Clair security scanner container
+      ansible.builtin.command:
+        cmd: >
+          sudo podman run -d
+          --name {{ clair_container_name }}
+          --network {{ macvlan_network_name }}
+          --ip {{ clair_ip }}
+          --dns {{ dns_server }}
+          --restart always
+          -e CLAIR_CONF=/clair/config.yaml
+          -e CLAIR_MODE=combo
+          -e TMPDIR=/tmp
+          --tmpfs /tmp:rw,mode=1777,size=2G
+          -w /tmp
+          -v {{ clair_config_dir }}:/clair:ro,Z
+          --health-cmd "curl -f http://127.0.0.1:{{ clair_introspection_port }}/healthz || curl -f http://127.0.0.1:{{ clair_port }}/healthz || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --health-start-period 30s
+          {{ clair_image }}
+      when: container_exists.rc != 0
+
+    - name: Start container if stopped
+      ansible.builtin.command:
+        cmd: sudo podman start {{ clair_container_name }}
+      when: container_exists.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for container to be running
+      ansible.builtin.command:
+        cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ clair_container_name }}
+      register: container_running
+      until: container_running.stdout == 'true'
+      retries: 20
+      delay: 2
+      changed_when: false
+
+    - name: Wait for Clair to complete database migrations and report healthy
+      ansible.builtin.command:
+        cmd: "sudo podman exec {{ clair_container_name }} curl -s -f http://127.0.0.1:{{ clair_introspection_port }}/healthz"
+      register: clair_health
+      until: clair_health.rc == 0
+      retries: 40
+      delay: 5
+      changed_when: false
+
+    - name: Display Clair status
+      ansible.builtin.debug:
+        msg:
+          - "Clair Security Scanner container is ready and healthy!"
+          - "Container: {{ clair_container_name }}"
+          - "Internal IP: {{ clair_ip }}:{{ clair_port }}"
+          - "Introspection Port: {{ clair_introspection_port }}"
+          - "Domain: quay-clair.kubesoar.com:{{ clair_port }}"
+          - "Database: quay-postgres.kubesoar.com:5432/{{ pg_database }}"
+          - "Auth PSK: Configured"

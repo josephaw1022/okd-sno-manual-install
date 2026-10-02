@@ -20,6 +20,8 @@
         ip: "192.168.1.32"
       - name: "quay.kubesoar.com"
         ip: "192.168.1.33"
+      - name: "quay-clair.kubesoar.com"
+        ip: "192.168.1.34"
 
   tasks:
     - name: Create Quay dnsmasq configuration on Pi-hole
@@ -70,6 +72,7 @@
           - "quay-valkey.kubesoar.com -> 192.168.1.31"
           - "quay-registry.kubesoar.com -> 192.168.1.32"
           - "quay.kubesoar.com -> 192.168.1.33"
+          - "quay-clair.kubesoar.com -> 192.168.1.34"
 
   handlers:
     - name: Restart pihole-FTL

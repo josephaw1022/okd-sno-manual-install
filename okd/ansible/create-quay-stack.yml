@@ -8,6 +8,9 @@
 - name: Deploy Quay Valkey Cache Container
   ansible.builtin.import_playbook: create-quay-valkey.yml
 
+- name: Deploy Quay Clair Security Scanner Container
+  ansible.builtin.import_playbook: create-quay-clair.yml
+
 - name: Deploy Quay Registry Container
   ansible.builtin.import_playbook: create-quay-registry.yml
 

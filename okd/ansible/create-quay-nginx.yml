@@ -58,18 +58,35 @@
         path: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
       delegate_to: localhost
       register: le_cert_stat
-      become: false
+      become: true
+
+    - name: Read Let's Encrypt certificate file from local laptop
+      ansible.builtin.slurp:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+      register: le_cert_content
+      delegate_to: localhost
+      become: true
+      when: le_cert_stat.stat.exists
+
+    - name: Read Let's Encrypt private key file from local laptop
+      ansible.builtin.slurp:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
+      register: le_key_content
+      delegate_to: localhost
+      become: true
+      no_log: true
+      when: le_cert_stat.stat.exists
 
     - name: Copy Let's Encrypt TLS certificate to laptop-server
       ansible.builtin.copy:
-        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+        content: "{{ le_cert_content.content | b64decode }}"
         dest: "{{ nginx_config_dir }}/certs/quay.crt"
         mode: '0644'
       when: le_cert_stat.stat.exists
 
     - name: Copy Let's Encrypt TLS private key to laptop-server
       ansible.builtin.copy:
-        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
+        content: "{{ le_key_content.content | b64decode }}"
         dest: "{{ nginx_config_dir }}/certs/quay.key"
         mode: '0600'
       no_log: true

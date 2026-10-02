@@ -1,0 +1,14 @@
+---
+- name: Check Clair scanner logs on laptop-server
+  hosts: laptop_libvirt_hosts
+  gather_facts: false
+  tasks:
+    - name: Get Clair logs
+      ansible.builtin.command:
+        cmd: sudo podman logs --tail 200 quay-clair
+      register: clair_logs
+      changed_when: false
+
+    - name: Display Clair logs
+      ansible.builtin.debug:
+        msg: "{{ clair_logs.stdout_lines + clair_logs.stderr_lines }}"

@@ -20,6 +20,7 @@
     dns_server: 192.168.1.5
     default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
     default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
+    default_clair_psk_base64: "azhzX2hvbWVsYWJfcXVheV9jbGFpcl9wc2tfc2VjcmV0X2tleV8xMjM0NTY3ODkwYWJjZGVm"
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
@@ -121,6 +122,12 @@
             - "60d"
             - "90d"
 
+          # Security Scanner (Clair)
+          FEATURE_SECURITY_SCANNER: true
+          SECURITY_SCANNER_V4_ENDPOINT: "http://quay-clair.kubesoar.com:6060"
+          SECURITY_SCANNER_V4_PSK: "{{ lookup('env', 'CLAIR_PSK_BASE64') | default(default_clair_psk_base64, true) }}"
+          SECURITY_SCANNER_INDEXING_INTERVAL: 30
+
           SUPER_USERS:
             - jwhiteaker
             - admin
@@ -155,18 +162,35 @@
         path: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
       delegate_to: localhost
       register: le_cert_stat
-      become: false
+      become: true
+
+    - name: Read Let's Encrypt certificate file from local laptop
+      ansible.builtin.slurp:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+      register: le_cert_content
+      delegate_to: localhost
+      become: true
+      when: le_cert_stat.stat.exists
+
+    - name: Read Let's Encrypt private key file from local laptop
+      ansible.builtin.slurp:
+        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
+      register: le_key_content
+      delegate_to: localhost
+      become: true
+      no_log: true
+      when: le_cert_stat.stat.exists
 
     - name: Copy Let's Encrypt TLS certificate to Quay config directory
       ansible.builtin.copy:
-        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+        content: "{{ le_cert_content.content | b64decode }}"
         dest: "{{ quay_config_dir }}/ssl.cert"
         mode: '0644'
       when: le_cert_stat.stat.exists
 
     - name: Copy Let's Encrypt TLS private key to Quay config directory
       ansible.builtin.copy:
-        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
+        content: "{{ le_key_content.content | b64decode }}"
         dest: "{{ quay_config_dir }}/ssl.key"
         mode: '0644'
       no_log: true
@@ -236,13 +260,10 @@
       changed_when: false
 
     - name: Wait for Quay to complete migrations and report healthy
-      ansible.builtin.uri:
-        url: "https://{{ quay_ip }}:8443/health/instance"
-        method: GET
-        status_code: 200
-        validate_certs: false
+      ansible.builtin.command:
+        cmd: "sudo podman exec {{ quay_container_name }} curl -k -s -f https://127.0.0.1:8443/health/instance || sudo podman exec {{ quay_container_name }} curl -s -f http://127.0.0.1:8080/health/instance"
       register: quay_health
-      until: quay_health.status == 200
+      until: quay_health.rc == 0
       retries: 40
       delay: 5
       changed_when: false

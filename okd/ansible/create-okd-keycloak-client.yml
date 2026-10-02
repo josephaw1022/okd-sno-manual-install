@@ -1,0 +1,109 @@
+---
+# Ansible playbook to create Keycloak EDP Operator client resource for OKD OAuth in homelab realm
+# Usage: ansible-playbook -i inventory.yml create-okd-keycloak-client.yml
+
+- name: Create Keycloak EDP Client Resource for OKD OAuth
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_HOMELAB_REALM') | default('homelab', true) }}"
+    okd_namespace: "openshift-config"
+    okd_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    okd_cluster_name: "{{ lookup('env', 'OKD_CLUSTER_NAME') | default('okd', true) }}"
+    okd_client_id: "{{ lookup('env', 'KEYCLOAK_OKD_CLIENT_NAME') | default('okd', true) }}"
+    okd_idp_name: "{{ lookup('env', 'KEYCLOAK_OKD_IDP_NAME') | default('keycloak', true) }}"
+    okd_oauth_hostname: "oauth-openshift.apps.{{ okd_cluster_name }}.{{ okd_base_domain }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure keycloak and openshift-config namespaces exist
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ item }}"
+      loop:
+        - "{{ keycloak_namespace }}"
+        - "{{ okd_namespace }}"
+
+    - name: Apply EDP KeycloakClient Custom Resource for OKD OAuth
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1.edp.epam.com/v1
+          kind: KeycloakClient
+          metadata:
+            name: "{{ okd_client_id }}"
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            clientId: "{{ okd_client_id }}"
+            realmRef:
+              kind: KeycloakRealm
+              name: "{{ keycloak_realm }}"
+            standardFlowEnabled: true
+            public: false
+            webUrl: "https://{{ okd_oauth_hostname }}"
+            redirectUris:
+              - "https://{{ okd_oauth_hostname }}/oauth2callback/{{ okd_idp_name }}"
+              - "https://{{ okd_oauth_hostname }}/oauth2callback/*"
+              - "https://{{ okd_oauth_hostname }}/*"
+            webOrigins:
+              - "+"
+            attributes:
+              post.logout.redirect.uris: "+"
+
+    - name: Wait for Keycloak client secret in keycloak namespace
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "keycloak-client-{{ okd_client_id }}-secret"
+        namespace: "{{ keycloak_namespace }}"
+      register: client_secret_info
+      until: client_secret_info.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: Extract client secret data
+      ansible.builtin.set_fact:
+        raw_secret_data: "{{ client_secret_info.resources[0].data }}"
+
+    - name: Sync Keycloak client secret to openshift-config namespace
+      when: raw_secret_data is defined
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "keycloak-client-{{ okd_client_id }}-secret"
+            namespace: "{{ okd_namespace }}"
+          type: Opaque
+          data: "{{ raw_secret_data }}"
+
+    - name: Display Keycloak client creation status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Keycloak client '{{ okd_client_id }}' created successfully in realm '{{ keycloak_realm }}'!"
+          - "Client ID:    {{ okd_client_id }}"
+          - "Realm:        {{ keycloak_realm }}"
+          - "Redirect URI: https://{{ okd_oauth_hostname }}/oauth2callback/{{ okd_idp_name }}"
+          - "Secret:       keycloak-client-{{ okd_client_id }}-secret (synced to {{ okd_namespace }})"

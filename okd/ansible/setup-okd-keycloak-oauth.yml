@@ -1,0 +1,170 @@
+---
+# Ansible playbook to configure Keycloak Homelab Realm OpenID OAuth for OKD
+# Usage: ansible-playbook -i inventory.yml setup-okd-keycloak-oauth.yml
+
+- name: Configure Keycloak Homelab OAuth for OKD
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    okd_namespace: "openshift-config"
+    keycloak_namespace: "{{ lookup('env', 'KEYCLOAK_NAMESPACE') | default('keycloak', true) }}"
+    keycloak_realm: "{{ lookup('env', 'KEYCLOAK_HOMELAB_REALM') | default('homelab', true) }}"
+    keycloak_base_domain: "{{ lookup('env', 'BASE_DOMAIN') | default('kubesoar.com', true) }}"
+    keycloak_hostname: "{{ lookup('env', 'KEYCLOAK_HOSTNAME') | default('keycloak.homelab.' + keycloak_base_domain, true) }}"
+    keycloak_okd_client_id: "{{ lookup('env', 'KEYCLOAK_OKD_CLIENT_NAME') | default('okd', true) }}"
+    keycloak_okd_idp_name: "{{ lookup('env', 'KEYCLOAK_OKD_IDP_NAME') | default('keycloak', true) }}"
+    keycloak_secret_name: "keycloak-client-{{ keycloak_okd_client_id }}-secret"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-marketplace
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Ensure Keycloak client secret is present in openshift-config
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ keycloak_secret_name }}"
+        namespace: "{{ okd_namespace }}"
+      register: target_sec_check
+
+    - name: Fetch Keycloak client secret from keycloak namespace if missing in openshift-config
+      when: target_sec_check.resources is not defined or target_sec_check.resources | length == 0
+      block:
+        - name: Get secret from keycloak namespace
+          kubernetes.core.k8s_info:
+            kind: Secret
+            name: "{{ keycloak_secret_name }}"
+            namespace: "{{ keycloak_namespace }}"
+          register: src_sec_check
+          until: src_sec_check.resources | length > 0
+          retries: 10
+          delay: 3
+
+        - name: Copy secret to openshift-config namespace
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: "{{ keycloak_secret_name }}"
+                namespace: "{{ okd_namespace }}"
+              type: Opaque
+              data: "{{ src_sec_check.resources[0].data }}"
+
+    - name: Fetch current OAuth cluster configuration
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: OAuth
+        name: cluster
+      register: current_oauth
+
+    - name: Construct Keycloak OpenID Identity Provider definition (mappingMethod add)
+      ansible.builtin.set_fact:
+        keycloak_idp_definition:
+          name: "{{ keycloak_okd_idp_name }}"
+          mappingMethod: add
+          type: OpenID
+          openID:
+            clientID: "{{ keycloak_okd_client_id }}"
+            clientSecret:
+              name: "{{ keycloak_secret_name }}"
+            issuer: "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}"
+            claims:
+              preferredUsername:
+                - preferred_username
+                - email
+              name:
+                - name
+              email:
+                - email
+            extraScopes:
+              - openid
+              - profile
+              - email
+
+    - name: Ensure existing identity providers also use mappingMethod add for multi-idp coexistence
+      ansible.builtin.set_fact:
+        adjusted_existing_idps: >-
+          {{
+            (current_oauth.resources[0].spec.identityProviders | default([]))
+            | rejectattr('name', 'equalto', keycloak_okd_idp_name)
+            | map('combine', {'mappingMethod': 'add'})
+            | list
+            if (current_oauth.resources is defined and current_oauth.resources | length > 0 and current_oauth.resources[0].spec.identityProviders is defined)
+            else []
+          }}
+
+    - name: Combine identity providers
+      ansible.builtin.set_fact:
+        updated_idps: "{{ adjusted_existing_idps + [keycloak_idp_definition] }}"
+
+    - name: Apply updated OAuth configuration to OpenShift cluster
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: config.openshift.io/v1
+          kind: OAuth
+          metadata:
+            name: cluster
+          spec:
+            identityProviders: "{{ updated_idps }}"
+
+    - name: Save Keycloak OAuth standalone template
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../cluster-setup/keycloak-oauth.yaml"
+        mode: '0644'
+        content: |
+          apiVersion: config.openshift.io/v1
+          kind: OAuth
+          metadata:
+            name: cluster
+          spec:
+            identityProviders:
+              - name: {{ keycloak_okd_idp_name }}
+                mappingMethod: add
+                type: OpenID
+                openID:
+                  clientID: "{{ keycloak_okd_client_id }}"
+                  clientSecret:
+                    name: "{{ keycloak_secret_name }}"
+                  issuer: "https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}"
+                  claims:
+                    preferredUsername:
+                      - preferred_username
+                      - email
+                    name:
+                      - name
+                    email:
+                      - email
+                  extraScopes:
+                    - openid
+                    - profile
+                    - email
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - "========================================================"
+          - "🎉 Keycloak Homelab OAuth configured for OKD!"
+          - "========================================================"
+          - "IdP Name:        {{ keycloak_okd_idp_name }}"
+          - "Mapping Method:  add (allows shared usernames across IDPs)"
+          - "Client ID:       {{ keycloak_okd_client_id }}"
+          - "Issuer:          https://{{ keycloak_hostname }}/realms/{{ keycloak_realm }}"
+          - "Secret Name:     {{ keycloak_secret_name }} (in openshift-config)"
+          - "Total IdPs:      {{ updated_idps | length }}"

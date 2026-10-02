@@ -25,6 +25,19 @@ echo "Master IPs: $MASTER0_IP, $MASTER1_IP, $MASTER2_IP"
 
 echo "🔧 Generating install-config.yaml for 3-node master cluster (agent-based)..."
 
+# Extract Quay credentials from group_vars/all.yml if present
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GROUP_VARS_FILE="${SCRIPT_DIR}/../ansible/group_vars/all.yml"
+QUAY_USER=$(grep -E '^quay_username:' "$GROUP_VARS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || echo "")
+QUAY_PASS=$(grep -E '^quay_password:' "$GROUP_VARS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || echo "")
+
+if [[ -n "$QUAY_USER" && -n "$QUAY_PASS" ]]; then
+  QUAY_AUTH=$(echo -n "${QUAY_USER}:${QUAY_PASS}" | base64 -w 0)
+  PULL_SECRET="{\"auths\":{\"quay.${BASE_DOMAIN}\":{\"auth\":\"${QUAY_AUTH}\"},\"fake\":{\"auth\":\"aWQ6cGFzcwo=\"}}}"
+else
+  PULL_SECRET='{"auths":{"fake":{"auth":"aWQ6cGFzcwo="}}}'
+fi
+
 cat > install-config.yaml <<EOF
 apiVersion: v1
 baseDomain: $BASE_DOMAIN
@@ -47,9 +60,16 @@ networking:
   - 172.30.0.0/16
 platform:
   none: {}
-pullSecret: '{"auths":{"fake":{"auth":"aWQ6cGFzcwo="}}}'
+pullSecret: '${PULL_SECRET}'
 sshKey: |
   $(cat $SSH_KEY_FILE)
+imageDigestSources:
+  - source: docker.io
+    mirrors:
+      - quay.$BASE_DOMAIN/dockerhub-cache
+  - source: quay.io
+    mirrors:
+      - quay.$BASE_DOMAIN/quay-cache
 EOF
 
 echo "✅ install-config.yaml created!"

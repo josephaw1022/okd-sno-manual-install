@@ -202,26 +202,48 @@ configure-cockpit-port-desktop: ## Configure Cockpit to run on port 443 on deskt
 	popd > /dev/null
 
 .PHONY: create-laptop-server-cert
-create-laptop-server-cert: ## Generate Let's Encrypt cert for laptop-server.kubesoar.com using certbot container.
-	@echo "🔐 Generating Let's Encrypt certificate for laptop-server.kubesoar.com..."
+create-laptop-server-cert: ## Generate Let's Encrypt cert for laptop-server.kubesoar.com using certbot container (Cloudflare DNS-01 challenge).
+	@echo "🔐 Generating Let's Encrypt certificate for laptop-server.$(BASE_DOMAIN)..."
+	@tempdir=$$(mktemp -d) && \
+	echo "dns_cloudflare_api_token = $$(grep cloudflare_api_token ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"')" > $$tempdir/cloudflare.ini && \
+	chmod 600 $$tempdir/cloudflare.ini && \
 	sudo $(CONTAINER_ENGINE) run --rm -it \
 	  -v /etc/letsencrypt:/etc/letsencrypt:z \
 	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  -v $$tempdir/cloudflare.ini:/etc/letsencrypt/cloudflare.ini:ro,z \
 	  $(CERTBOT_IMAGE) certonly \
-	  --manual \
-	  --preferred-challenges dns \
-	  -d "laptop-server.kubesoar.com"
+	  --dns-cloudflare \
+	  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+	  --dns-cloudflare-propagation-seconds 30 \
+	  --non-interactive \
+	  --agree-tos \
+	  -m josephaw1022@gmail.com \
+	  --no-eff-email \
+	  -d "laptop-server.$(BASE_DOMAIN)"; \
+	rm -rf $$tempdir
+	@echo "✅ Certificate generated for laptop-server.$(BASE_DOMAIN)"
 
 .PHONY: create-desktop-server-cert
-create-desktop-server-cert: ## Generate Let's Encrypt cert for desktop-server.kubesoar.com using certbot container.
-	@echo "🔐 Generating Let's Encrypt certificate for desktop-server.kubesoar.com..."
+create-desktop-server-cert: ## Generate Let's Encrypt cert for desktop-server.kubesoar.com using certbot container (Cloudflare DNS-01 challenge).
+	@echo "🔐 Generating Let's Encrypt certificate for desktop-server.$(BASE_DOMAIN)..."
+	@tempdir=$$(mktemp -d) && \
+	echo "dns_cloudflare_api_token = $$(grep cloudflare_api_token ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"')" > $$tempdir/cloudflare.ini && \
+	chmod 600 $$tempdir/cloudflare.ini && \
 	sudo $(CONTAINER_ENGINE) run --rm -it \
 	  -v /etc/letsencrypt:/etc/letsencrypt:z \
 	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  -v $$tempdir/cloudflare.ini:/etc/letsencrypt/cloudflare.ini:ro,z \
 	  $(CERTBOT_IMAGE) certonly \
-	  --manual \
-	  --preferred-challenges dns \
-	  -d "desktop-server.kubesoar.com"
+	  --dns-cloudflare \
+	  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+	  --dns-cloudflare-propagation-seconds 30 \
+	  --non-interactive \
+	  --agree-tos \
+	  -m josephaw1022@gmail.com \
+	  --no-eff-email \
+	  -d "desktop-server.$(BASE_DOMAIN)"; \
+	rm -rf $$tempdir
+	@echo "✅ Certificate generated for desktop-server.$(BASE_DOMAIN)"
 
 .PHONY: transfer-cockpit-cert-laptop
 transfer-cockpit-cert-laptop: ## Transfer Let's Encrypt cert for laptop-server to laptop-server Cockpit.
@@ -436,8 +458,16 @@ TAILSCALE_EXIT_NODE ?= 100.110.200.108
 TAILSCALE_ADVERTISED_ROUTES ?= 192.168.1.0/24
 OKD_API_URL ?= https://api.$(CLUSTER_NAME).$(BASE_DOMAIN):6443
 
+.PHONY: configure-macvlan-shim-laptop
+configure-macvlan-shim-laptop: ## Configure persistent macvlan-shim on laptop-server for host and subnet router to container/VM communication.
+	@echo "🌉 Configuring macvlan shim on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-macvlan-shim-laptop.yml && \
+	popd > /dev/null
+	@echo "✅ Macvlan shim configured and verified"
+
 .PHONY: configure-tailscale-laptop setup-tailscale-laptop
-configure-tailscale-laptop: ## Configure laptop-server as Tailscale exit node & subnet router via Ansible.
+configure-tailscale-laptop: configure-macvlan-shim-laptop ## Configure laptop-server as Tailscale exit node & subnet router via Ansible.
 	@echo "⚙️ Configuring laptop-server as Tailscale exit node and subnet router..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml configure-tailscale-laptop.yml \
@@ -489,12 +519,15 @@ reset-ts-laptop: tailscale-reset
 tailscale-status: ## Check Tailscale status and active exit node.
 	tailscale status
 
-.PHONY: oc-login login
+.PHONY: oc-login login oc-login-web login-web web-login
 oc-login: ## Log in to OKD cluster via web browser.
 	@echo "🔐 Logging in to OKD cluster ($(OKD_API_URL))..."
 	oc login --web --server=$(OKD_API_URL)
 
 login: oc-login
+oc-login-web: oc-login
+login-web: oc-login
+web-login: oc-login
 
 
 ##@ Manifest Inspection
@@ -671,15 +704,25 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 ##@ Quay Registry Stack (laptop-server)
 
 .PHONY: create-quay-ingress-cert create-quay-cert
-create-quay-ingress-cert: ## Generate Let's Encrypt cert for quay.kubesoar.com using certbot container (DNS-01 challenge).
-	@echo "🔐 Generating Let's Encrypt certificate for quay.$(BASE_DOMAIN) using $(CONTAINER_ENGINE)..."
+create-quay-ingress-cert: ## Generate Let's Encrypt cert for quay.kubesoar.com using certbot container (Cloudflare DNS-01 challenge).
+	@echo "🔐 Generating Let's Encrypt certificate for quay.$(BASE_DOMAIN)..."
+	@tempdir=$$(mktemp -d) && \
+	echo "dns_cloudflare_api_token = $$(grep cloudflare_api_token ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"')" > $$tempdir/cloudflare.ini && \
+	chmod 600 $$tempdir/cloudflare.ini && \
 	sudo $(CONTAINER_ENGINE) run --rm -it \
 	  -v /etc/letsencrypt:/etc/letsencrypt:z \
 	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  -v $$tempdir/cloudflare.ini:/etc/letsencrypt/cloudflare.ini:ro,z \
 	  $(CERTBOT_IMAGE) certonly \
-	  --manual \
-	  --preferred-challenges dns \
-	  -d "quay.$(BASE_DOMAIN)"
+	  --dns-cloudflare \
+	  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+	  --dns-cloudflare-propagation-seconds 30 \
+	  --non-interactive \
+	  --agree-tos \
+	  -m josephaw1022@gmail.com \
+	  --no-eff-email \
+	  -d "quay.$(BASE_DOMAIN)"; \
+	rm -rf $$tempdir
 	@echo "✅ Certificate generated for quay.$(BASE_DOMAIN)"
 
 create-quay-cert: create-quay-ingress-cert
@@ -716,6 +759,15 @@ create-quay-valkey: ## Create Valkey cache container for Quay on laptop-server.
 	@echo "✅ Quay Valkey container created"
 
 
+.PHONY: create-quay-clair
+create-quay-clair: ## Create Clair image security scanner container for Quay on laptop-server.
+	@echo "🔍 Creating Clair image scanner container on laptop-server..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml create-quay-clair.yml && \
+	popd > /dev/null
+	@echo "✅ Quay Clair container created"
+
+
 .PHONY: create-quay-registry
 create-quay-registry: ## Create Quay registry container on laptop-server.
 	@echo "📦 Creating Quay registry container on laptop-server..."
@@ -735,7 +787,7 @@ create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress contain
 
 
 .PHONY: create-quay-stack
-create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Registry, Nginx) on laptop-server.
+create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Clair, Registry, Nginx) on laptop-server.
 	@echo "🚀 Deploying full Quay stack on laptop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-stack.yml && \
@@ -765,6 +817,13 @@ update-quay-config: ## Update Quay config.yaml (e.g. superusers) on laptop-serve
 quay-logs: ## View Quay registry container logs on laptop-server.
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml check-quay-logs.yml && \
+	popd > /dev/null
+
+
+.PHONY: clair-logs
+clair-logs: ## View Clair container logs on laptop-server.
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml check-clair-logs.yml && \
 	popd > /dev/null
 
 
@@ -825,18 +884,28 @@ ansible-deps: ## Install Ansible Galaxy collection dependencies.
 
 
 CONTAINER_ENGINE ?= podman
-CERTBOT_IMAGE ?= docker.io/certbot/certbot:latest
+CERTBOT_IMAGE ?= docker.io/certbot/dns-cloudflare:latest
 
 .PHONY: create-ingress-cert
-create-ingress-cert: ## Generate Let's Encrypt wildcard cert using certbot container (DNS-01 challenge).
-	@echo "🔐 Generating Let's Encrypt wildcard certificate for *.apps.$(CLUSTER_NAME).$(BASE_DOMAIN) using $(CONTAINER_ENGINE)..."
+create-ingress-cert: ## Generate Let's Encrypt wildcard cert using certbot container (Cloudflare DNS-01 challenge).
+	@echo "🔐 Generating Let's Encrypt wildcard certificate for *.apps.$(CLUSTER_NAME).$(BASE_DOMAIN)..."
+	@tempdir=$$(mktemp -d) && \
+	echo "dns_cloudflare_api_token = $$(grep cloudflare_api_token ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"')" > $$tempdir/cloudflare.ini && \
+	chmod 600 $$tempdir/cloudflare.ini && \
 	sudo $(CONTAINER_ENGINE) run --rm -it \
 	  -v /etc/letsencrypt:/etc/letsencrypt:z \
 	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	  -v $$tempdir/cloudflare.ini:/etc/letsencrypt/cloudflare.ini:ro,z \
 	  $(CERTBOT_IMAGE) certonly \
-	  --manual \
-	  --preferred-challenges dns \
-	  -d "*.apps.$(CLUSTER_NAME).$(BASE_DOMAIN)"
+	  --dns-cloudflare \
+	  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+	  --dns-cloudflare-propagation-seconds 30 \
+	  --non-interactive \
+	  --agree-tos \
+	  -m josephaw1022@gmail.com \
+	  --no-eff-email \
+	  -d "*.apps.$(CLUSTER_NAME).$(BASE_DOMAIN)"; \
+	rm -rf $$tempdir
 	@echo "✅ Certificate generated. Run 'make apply-ingress-cert' to apply it to OKD ingress."
 
 
@@ -861,6 +930,66 @@ delete-kubelet-config: ## Delete kubelet config.
 	@echo "🗑️ Deleting kubelet config..."
 	oc delete -f cluster-setup/kubelet-config.yaml
 	@echo "✅ Kubelet config deleted"
+
+
+.PHONY: apply-quay-cache-mirrors
+apply-quay-cache-mirrors: ## Apply ImageDigestMirrorSet and ImageTagMirrorSet for Quay & DockerHub pull-through caches.
+	@echo "🪞 Applying Quay and DockerHub pull-through cache mirror configurations..."
+	@sed 's/quay\.kubesoar\.com/quay.$(BASE_DOMAIN)/g' cluster-setup/quay-cache-mirrors.yaml | oc apply -f -
+	@echo "✅ Pull-through cache mirrors applied! MachineConfigOperator will update /etc/containers/registries.conf on all nodes."
+
+
+.PHONY: delete-quay-cache-mirrors
+delete-quay-cache-mirrors: ## Remove ImageDigestMirrorSet and ImageTagMirrorSet for Quay & DockerHub pull-through caches.
+	@echo "🗑️ Removing Quay and DockerHub pull-through cache mirror configurations..."
+	@sed 's/quay\.kubesoar\.com/quay.$(BASE_DOMAIN)/g' cluster-setup/quay-cache-mirrors.yaml | oc delete --ignore-not-found -f -
+	@echo "✅ Pull-through cache mirrors removed."
+
+
+.PHONY: verify-quay-cache-mirrors
+verify-quay-cache-mirrors: ## Check status of IDMS, ITMS, node registries.conf, kubelet pull secret, and test pod image pull.
+	@echo "🔍 Checking ImageDigestMirrorSet & ImageTagMirrorSet..."
+	@oc get imagedigestmirrorset,imagetagmirrorset
+	@echo ""
+	@echo "🔍 Checking MachineConfigPool status..."
+	@oc get mcp
+	@echo ""
+	@echo "🔍 Checking registries.conf on master-0 ($(MASTER0_IP))..."
+	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER0_IP) \
+		"sudo grep -A 6 'quay\.kubesoar\.com' /etc/containers/registries.conf || sudo cat /etc/containers/registries.conf"
+	@echo ""
+	@echo "🔍 Checking Quay auth in /var/lib/kubelet/config.json on master-0 ($(MASTER0_IP))..."
+	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER0_IP) \
+		"sudo jq '.auths | keys' /var/lib/kubelet/config.json 2>/dev/null || echo 'Checked config.json'"
+	@echo ""
+	@echo "🧪 Testing image pull via test pod..."
+	@oc delete pod test-quay-cache-pull --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	@oc run test-quay-cache-pull --image=docker.io/library/busybox:latest --restart=Never --command -- sh -c "echo 'Pull successful from cache!'; sleep 1"
+	@oc wait --for=condition=Ready pod/test-quay-cache-pull --timeout=30s 2>/dev/null || true
+	@oc logs test-quay-cache-pull
+	@oc delete pod test-quay-cache-pull --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	@echo "✅ Node verification completed successfully!"
+
+
+
+
+.PHONY: setup-quay-pull-secret
+setup-quay-pull-secret: ## Configure Quay registry credentials in OKD global pull secret via Ansible using group_vars/all.yml.
+	@echo "🔐 Configuring Quay registry credentials in OKD global pull-secret..."
+	@pushd ansible > /dev/null && \
+	BASE_DOMAIN="$(BASE_DOMAIN)" \
+	ansible-playbook -i inventory.yml setup-quay-pull-secret.yml && \
+	popd > /dev/null
+	@echo "✅ Quay credentials added to global pull-secret"
+
+
+.PHONY: get-pull-secret
+get-pull-secret: ## Display configured registry domains in the cluster pull secret.
+	@echo "🔍 Checking registries in global pull-secret (openshift-config)..."
+	@oc get secret/pull-secret -n openshift-config -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | jq '.auths | keys'
+
+
+
 
 
 .PHONY: fix-bootstrap
@@ -1810,6 +1939,8 @@ KEYCLOAK_HOMELAB_REALM ?= homelab
 KEYCLOAK_HOMELAB_ENTRAID_APP_NAME ?= Keycloak-Homelab-Realm-OAuth
 KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME ?= keycloak-homelab-entraid-secret
 KEYCLOAK_HOMELAB_USER_GROUP ?= homelab-user
+KEYCLOAK_OKD_CLIENT_NAME ?= okd
+KEYCLOAK_OKD_IDP_NAME ?= keycloak
 
 
 .PHONY: install-keycloak-operator
@@ -1956,6 +2087,41 @@ deploy-keycloak-homelab-realm: configure-keycloak-homelab-realm
 setup-keycloak-homelab-realm: configure-keycloak-homelab-realm
 
 
+.PHONY: create-okd-keycloak-client setup-okd-keycloak-client
+create-okd-keycloak-client: ## Create Keycloak EDP Operator client resource for OKD OAuth in homelab realm.
+	@echo "🔑 Creating Keycloak client for OKD in $(KEYCLOAK_HOMELAB_REALM) realm..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_HOMELAB_REALM="$(KEYCLOAK_HOMELAB_REALM)" \
+	BASE_DOMAIN="$(BASE_DOMAIN)" \
+	OKD_CLUSTER_NAME="$(CLUSTER_NAME)" \
+	KEYCLOAK_OKD_CLIENT_NAME="$(KEYCLOAK_OKD_CLIENT_NAME)" \
+	KEYCLOAK_OKD_IDP_NAME="$(KEYCLOAK_OKD_IDP_NAME)" \
+	ansible-playbook -i inventory.yml create-okd-keycloak-client.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak client for OKD created and secret synced"
+
+setup-okd-keycloak-client: create-okd-keycloak-client
+
+
+.PHONY: setup-okd-keycloak-oauth configure-okd-keycloak-oauth setup-keycloak-oauth
+setup-okd-keycloak-oauth: ## Configure Keycloak Homelab Realm OpenID OAuth provider on OKD cluster.
+	@echo "🔐 Configuring Keycloak OAuth provider for OKD cluster..."
+	@pushd ansible > /dev/null && \
+	KEYCLOAK_NAMESPACE="$(KEYCLOAK_NAMESPACE)" \
+	KEYCLOAK_HOMELAB_REALM="$(KEYCLOAK_HOMELAB_REALM)" \
+	BASE_DOMAIN="$(BASE_DOMAIN)" \
+	KEYCLOAK_HOSTNAME="$(KEYCLOAK_HOSTNAME)" \
+	KEYCLOAK_OKD_CLIENT_NAME="$(KEYCLOAK_OKD_CLIENT_NAME)" \
+	KEYCLOAK_OKD_IDP_NAME="$(KEYCLOAK_OKD_IDP_NAME)" \
+	ansible-playbook -i inventory.yml setup-okd-keycloak-oauth.yml && \
+	popd > /dev/null
+	@echo "✅ Keycloak OAuth provider configured on OKD cluster"
+
+configure-okd-keycloak-oauth: setup-okd-keycloak-oauth
+setup-keycloak-oauth: setup-okd-keycloak-oauth
+
+
 .PHONY: deploy-keycloak create-keycloak
 deploy-keycloak: ## Deploy Keycloak Custom Resource (Istio ingress, cert-manager TLS, CNPG DB, and Entra ID IdP).
 	@echo "👑 Deploying Keycloak CR ($(KEYCLOAK_NAME)) at $(KEYCLOAK_HOSTNAME)..."
@@ -1990,7 +2156,7 @@ setup-keycloak: install-keycloak
 
 
 .PHONY: setup-keycloak-all install-keycloak-all
-setup-keycloak-all: setup-keycloak-entraid install-keycloak setup-keycloak-homelab-entraid configure-keycloak-homelab-realm ## Complete Keycloak setup including master and homelab realms, Entra ID groups, operator, database, and CRs.
+setup-keycloak-all: setup-keycloak-entraid install-keycloak setup-keycloak-homelab-entraid configure-keycloak-homelab-realm create-okd-keycloak-client setup-okd-keycloak-oauth ## Complete Keycloak setup including master and homelab realms, Entra ID groups, operator, database, and OKD client/OAuth.
 install-keycloak-all: setup-keycloak-all
 
 
@@ -2155,7 +2321,7 @@ destroy-openbao: uninstall-openbao
 
 ARC_NAMESPACE ?= github-arc
 ARC_HELM_RELEASE ?= arc
-ARC_CHART_VERSION ?= 0.14.2
+ARC_CHART_VERSION ?= 0.15.0
 
 .PHONY: install-arc-controller install-arc
 install-arc-controller: ## Install Actions Runner Controller (ARC) via Helm.
