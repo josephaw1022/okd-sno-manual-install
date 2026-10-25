@@ -1,6 +1,6 @@
 ---
 name: homelab-remote-access
-description: Use when configuring or troubleshooting remote access to the homelab: Tailscale exit node and subnet routing, the macvlan shim, and Cockpit on laptop-server and desktop-server.
+description: "Use when configuring or troubleshooting remote access to the homelab: Tailscale exit node and subnet routing, the macvlan shim, and Cockpit on laptop-server and desktop-server."
 ---
 
 # Homelab Remote Access

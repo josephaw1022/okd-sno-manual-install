@@ -1,10 +1,10 @@
 ---
-# Ansible playbook to transfer Let's Encrypt certificate for quay.kubesoar.com to laptop-server
+# Ansible playbook to transfer Let's Encrypt certificate for quay.kubesoar.com to desktop-server
 # and restart Quay and Nginx containers.
 # Usage: ansible-playbook -i inventory.yml transfer-quay-cert.yml
 
-- name: Transfer Quay Certificate to laptop-server
-  hosts: laptop_libvirt_hosts
+- name: Transfer Quay Certificate to desktop-server
+  hosts: libvirt_hosts
   become: true
   vars:
     cert_domain: "quay.kubesoar.com"

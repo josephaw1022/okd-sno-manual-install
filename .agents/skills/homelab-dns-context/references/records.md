@@ -15,6 +15,8 @@ Static records managed via `dnsmasq` configs (`/etc/dnsmasq.d/`) on the Pi-hole 
 | `pihole.kubesoar.com` | 192.168.1.5 | Pi-hole VM |
 | `postgres.kubesoar.com` | 192.168.1.25 | BYOC Logs PostgreSQL |
 | `minio.kubesoar.com` | 192.168.1.26 | BYOC Logs MinIO |
+| `desktop-server.kubesoar.com` | 192.168.1.9 | Desktop Server (Libvirt Host) |
+| `laptop-server.kubesoar.com` | 192.168.1.4 | Laptop Server |
 
 ## Homelab Wildcard (`homelab.conf`)
 

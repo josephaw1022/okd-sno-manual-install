@@ -31,20 +31,33 @@ NODE_DATA_POOL ?= okd-storage
 SERVER_HOST ?= 192.168.1.9
 SERVER_USER ?= root
 
-# Laptop server single-VM settings
-LAPTOP_VM_NAME ?= pihole
-LAPTOP_VM_HOSTNAME ?= pihole.kubesoar.com
-LAPTOP_VM_VCPUS ?= 2
-LAPTOP_VM_MEMORY_MB ?= 4096
-LAPTOP_VM_DISK_SIZE_GB ?= 32
-LAPTOP_VM_FEDORA_RELEASE ?= 44
-LAPTOP_VM_CLOUD_IMAGE_NAME ?= Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
-LAPTOP_VM_IP ?= 192.168.1.5
-LAPTOP_VM_PREFIX ?= 24
-LAPTOP_VM_GATEWAY ?= 192.168.1.1
-LAPTOP_VM_DNS ?= 192.168.1.5
-LAPTOP_VM_MAC_ADDRESS ?= 52:54:00:00:00:06
-LAPTOP_VM_STORAGE_POOL ?= System
+# Desktop server single-VM settings (DNS / Pi-hole)
+DNS_VM_NAME ?= pihole
+DNS_VM_HOSTNAME ?= pihole.kubesoar.com
+DNS_VM_VCPUS ?= 2
+DNS_VM_MEMORY_MB ?= 4096
+DNS_VM_DISK_SIZE_GB ?= 32
+DNS_VM_FEDORA_RELEASE ?= 44
+DNS_VM_CLOUD_IMAGE_NAME ?= Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+DNS_VM_IP ?= 192.168.1.5
+DNS_VM_PREFIX ?= 24
+DNS_VM_GATEWAY ?= 192.168.1.1
+DNS_VM_DNS ?= 192.168.1.5
+DNS_VM_MAC_ADDRESS ?= 52:54:00:00:00:06
+DNS_VM_STORAGE_POOL ?= default
+LAPTOP_VM_NAME ?= $(DNS_VM_NAME)
+LAPTOP_VM_HOSTNAME ?= $(DNS_VM_HOSTNAME)
+LAPTOP_VM_VCPUS ?= $(DNS_VM_VCPUS)
+LAPTOP_VM_MEMORY_MB ?= $(DNS_VM_MEMORY_MB)
+LAPTOP_VM_DISK_SIZE_GB ?= $(DNS_VM_DISK_SIZE_GB)
+LAPTOP_VM_FEDORA_RELEASE ?= $(DNS_VM_FEDORA_RELEASE)
+LAPTOP_VM_CLOUD_IMAGE_NAME ?= $(DNS_VM_CLOUD_IMAGE_NAME)
+LAPTOP_VM_IP ?= $(DNS_VM_IP)
+LAPTOP_VM_PREFIX ?= $(DNS_VM_PREFIX)
+LAPTOP_VM_GATEWAY ?= $(DNS_VM_GATEWAY)
+LAPTOP_VM_DNS ?= $(DNS_VM_DNS)
+LAPTOP_VM_MAC_ADDRESS ?= $(DNS_VM_MAC_ADDRESS)
+LAPTOP_VM_STORAGE_POOL ?= $(DNS_VM_STORAGE_POOL)
 PIHOLE_WEBPASSWORD ?= changeme
 PIHOLE_UPSTREAM_DNS_1 ?= 1.1.1.1
 PIHOLE_UPSTREAM_DNS_2 ?= 1.0.0.1
@@ -108,37 +121,43 @@ fcos: ## Download the FCOS ISO (for reference, agent-iso creates its own).
 
 ##@ Pi-hole & DNS
 
-.PHONY: create-dns-server-vm-on-laptop-server
-create-dns-server-vm-on-laptop-server: ## Create DNS server VM on laptop-server (192.168.1.4) via Ansible.
-	@echo "💻 Creating DNS server VM on laptop-server..."
+.PHONY: create-dns-server-vm-on-desktop-server create-dns-server-vm-on-laptop-server create-dns-server-vm
+create-dns-server-vm-on-desktop-server: ## Create DNS server VM on desktop-server (192.168.1.9) via Ansible.
+	@echo "💻 Creating DNS server VM on desktop-server..."
 	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml create-dns-server-vm-on-laptop-server.yml \
-	  -e "laptop_vm_name=$(LAPTOP_VM_NAME)" \
-	  -e "laptop_vm_hostname=$(LAPTOP_VM_HOSTNAME)" \
-	  -e "laptop_vm_vcpus=$(LAPTOP_VM_VCPUS)" \
-	  -e "laptop_vm_memory_mb=$(LAPTOP_VM_MEMORY_MB)" \
-	  -e "laptop_vm_disk_size_gb=$(LAPTOP_VM_DISK_SIZE_GB)" \
-	  -e "laptop_vm_fedora_release=$(LAPTOP_VM_FEDORA_RELEASE)" \
-	  -e "laptop_vm_cloud_image_name=$(LAPTOP_VM_CLOUD_IMAGE_NAME)" \
-	  -e "laptop_vm_ip=$(LAPTOP_VM_IP)" \
-	  -e "laptop_vm_prefix=$(LAPTOP_VM_PREFIX)" \
-	  -e "laptop_vm_gateway=$(LAPTOP_VM_GATEWAY)" \
-	  -e "laptop_vm_dns=$(LAPTOP_VM_DNS)" \
-	  -e "laptop_vm_mac_address=$(LAPTOP_VM_MAC_ADDRESS)" \
-	  -e "laptop_vm_storage_pool=$(LAPTOP_VM_STORAGE_POOL)" && \
+	ansible-playbook -i inventory.yml create-dns-server-vm-on-desktop-server.yml \
+	  -e "laptop_vm_name=$(DNS_VM_NAME)" \
+	  -e "laptop_vm_hostname=$(DNS_VM_HOSTNAME)" \
+	  -e "laptop_vm_vcpus=$(DNS_VM_VCPUS)" \
+	  -e "laptop_vm_memory_mb=$(DNS_VM_MEMORY_MB)" \
+	  -e "laptop_vm_disk_size_gb=$(DNS_VM_DISK_SIZE_GB)" \
+	  -e "laptop_vm_fedora_release=$(DNS_VM_FEDORA_RELEASE)" \
+	  -e "laptop_vm_cloud_image_name=$(DNS_VM_CLOUD_IMAGE_NAME)" \
+	  -e "laptop_vm_ip=$(DNS_VM_IP)" \
+	  -e "laptop_vm_prefix=$(DNS_VM_PREFIX)" \
+	  -e "laptop_vm_gateway=$(DNS_VM_GATEWAY)" \
+	  -e "laptop_vm_dns=$(DNS_VM_DNS)" \
+	  -e "laptop_vm_mac_address=$(DNS_VM_MAC_ADDRESS)" \
+	  -e "laptop_vm_storage_pool=$(DNS_VM_STORAGE_POOL)" && \
 	popd > /dev/null
 	@echo "✅ DNS server VM created (or already present)"
 
+create-dns-server-vm-on-laptop-server: create-dns-server-vm-on-desktop-server
+create-dns-server-vm: create-dns-server-vm-on-desktop-server
 
-.PHONY: delete-dns-server-vm-on-laptop-server
-delete-dns-server-vm-on-laptop-server: ## Delete DNS server VM on laptop-server (192.168.1.4) via Ansible.
-	@echo "🗑️ Deleting DNS server VM on laptop-server..."
+
+.PHONY: delete-dns-server-vm-on-desktop-server delete-dns-server-vm-on-laptop-server delete-dns-server-vm
+delete-dns-server-vm-on-desktop-server: ## Delete DNS server VM on desktop-server (192.168.1.9) via Ansible.
+	@echo "🗑️ Deleting DNS server VM on desktop-server..."
 	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml delete-dns-server-vm-on-laptop-server.yml \
-	  -e "laptop_vm_name=$(LAPTOP_VM_NAME)" \
-	  -e "laptop_vm_storage_pool=$(LAPTOP_VM_STORAGE_POOL)" && \
+	ansible-playbook -i inventory.yml delete-dns-server-vm-on-desktop-server.yml \
+	  -e "laptop_vm_name=$(DNS_VM_NAME)" \
+	  -e "laptop_vm_storage_pool=$(DNS_VM_STORAGE_POOL)" && \
 	popd > /dev/null
 	@echo "✅ DNS server VM deleted (if present)"
+
+delete-dns-server-vm-on-laptop-server: delete-dns-server-vm-on-desktop-server
+delete-dns-server-vm: delete-dns-server-vm-on-desktop-server
 
 
 .PHONY: install-pihole-on-dns-server-vm
@@ -169,6 +188,18 @@ add-quay-dns: ## Add Quay DNS records to Pi-hole and verify resolution.
 	ansible-playbook -i inventory.yml add-quay-dns-to-pihole.yml && \
 	popd > /dev/null
 	@echo "✅ Quay DNS updated and verified"
+
+
+.PHONY: add-desktop-server-dns add-desktop-dns
+add-desktop-server-dns: update-dns ## Add desktop-server domain to Pi-hole and update DNS.
+add-desktop-dns: add-desktop-server-dns
+
+
+.PHONY: setup-dns-server spin-up-dns
+setup-dns-server: create-dns-server-vm-on-desktop-server install-pihole-on-dns-server-vm update-dns configure-macvlan-shim-desktop ## Full setup to create, install, configure DNS, and enable macvlan shim on desktop-server.
+	@echo "✅ DNS server fully configured and operational on desktop-server!"
+
+spin-up-dns: setup-dns-server
 
 
 ##@ Cockpit Management
@@ -458,13 +489,16 @@ TAILSCALE_EXIT_NODE ?= 100.110.200.108
 TAILSCALE_ADVERTISED_ROUTES ?= 192.168.1.0/24
 OKD_API_URL ?= https://api.$(CLUSTER_NAME).$(BASE_DOMAIN):6443
 
-.PHONY: configure-macvlan-shim-laptop
-configure-macvlan-shim-laptop: ## Configure persistent macvlan-shim on laptop-server for host and subnet router to container/VM communication.
-	@echo "🌉 Configuring macvlan shim on laptop-server..."
+.PHONY: configure-macvlan-shim-desktop configure-macvlan-shim-laptop configure-macvlan-shim
+configure-macvlan-shim-desktop: ## Configure persistent macvlan-shim on desktop-server for host and subnet router to container/VM communication.
+	@echo "🌉 Configuring macvlan shim on desktop-server..."
 	@pushd ansible > /dev/null && \
-	ansible-playbook -i inventory.yml configure-macvlan-shim-laptop.yml && \
+	ansible-playbook -i inventory.yml configure-macvlan-shim-desktop.yml && \
 	popd > /dev/null
-	@echo "✅ Macvlan shim configured and verified"
+	@echo "✅ Macvlan shim configured and verified on desktop-server"
+
+configure-macvlan-shim: configure-macvlan-shim-desktop
+configure-macvlan-shim-laptop: configure-macvlan-shim-desktop
 
 .PHONY: configure-tailscale-laptop setup-tailscale-laptop
 configure-tailscale-laptop: configure-macvlan-shim-laptop ## Configure laptop-server as Tailscale exit node & subnet router via Ansible.
@@ -660,6 +694,13 @@ start-vms: ## Start all stopped VMs on the libvirt server via Ansible.
 	@echo "✅ VMs started"
 
 
+.PHONY: restart-vms reboot-vms
+restart-vms: stop-vms start-vms ## Restart (stop then start) all OKD master VMs via Ansible.
+	@echo "✅ OKD VMs restarted"
+
+reboot-vms: restart-vms
+
+
 .PHONY: enable-vm-autostart
 enable-vm-autostart: ## Enable autostart for currently running OKD master VMs.
 	@echo "🔁 Enabling autostart for running OKD master VMs..."
@@ -701,40 +742,46 @@ destroy-lb: ## Destroy nginx load balancer container and network.
 
 
 
-##@ Quay Registry Stack (laptop-server)
+##@ Quay Registry Stack (desktop-server)
 
 .PHONY: create-quay-ingress-cert create-quay-cert
 create-quay-ingress-cert: ## Generate Let's Encrypt cert for quay.kubesoar.com using certbot container (Cloudflare DNS-01 challenge).
-	@echo "🔐 Generating Let's Encrypt certificate for quay.$(BASE_DOMAIN)..."
-	@tempdir=$$(mktemp -d) && \
-	echo "dns_cloudflare_api_token = $$(grep cloudflare_api_token ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"')" > $$tempdir/cloudflare.ini && \
-	chmod 600 $$tempdir/cloudflare.ini && \
-	sudo $(CONTAINER_ENGINE) run --rm -it \
-	  -v /etc/letsencrypt:/etc/letsencrypt:z \
-	  -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
-	  -v $$tempdir/cloudflare.ini:/etc/letsencrypt/cloudflare.ini:ro,z \
-	  $(CERTBOT_IMAGE) certonly \
-	  --dns-cloudflare \
-	  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-	  --dns-cloudflare-propagation-seconds 30 \
-	  --non-interactive \
-	  --agree-tos \
-	  -m josephaw1022@gmail.com \
-	  --no-eff-email \
-	  -d "quay.$(BASE_DOMAIN)"; \
-	rm -rf $$tempdir
-	@echo "✅ Certificate generated for quay.$(BASE_DOMAIN)"
+	@if [ -f "/etc/letsencrypt/live/quay.$(BASE_DOMAIN)/fullchain.pem" ]; then \
+	  echo "✅ Valid Let's Encrypt certificate already exists at /etc/letsencrypt/live/quay.$(BASE_DOMAIN)"; \
+	else \
+	  echo "🔐 Generating Let's Encrypt certificate for quay.$(BASE_DOMAIN)..."; \
+	  tempdir=$$(mktemp -d) && \
+	  echo "dns_cloudflare_api_token = $$(grep cloudflare_api_token ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"')" > $$tempdir/cloudflare.ini && \
+	  chmod 600 $$tempdir/cloudflare.ini && \
+	  echo "$$(grep local_become_password ansible/group_vars/all.yml | awk '{print $$2}')" | sudo -S $(CONTAINER_ENGINE) run --rm -i \
+	    -v /etc/letsencrypt:/etc/letsencrypt:z \
+	    -v /var/lib/letsencrypt:/var/lib/letsencrypt:z \
+	    -v $$tempdir/cloudflare.ini:/etc/letsencrypt/cloudflare.ini:ro,z \
+	    $(CERTBOT_IMAGE) certonly \
+	    --dns-cloudflare \
+	    --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+	    --dns-cloudflare-propagation-seconds 30 \
+	    --non-interactive \
+	    --agree-tos \
+	    -m josephaw1022@gmail.com \
+	    --no-eff-email \
+	    -d "quay.$(BASE_DOMAIN)"; \
+	  rm -rf $$tempdir; \
+	  echo "✅ Certificate generated for quay.$(BASE_DOMAIN)"; \
+	fi
 
 create-quay-cert: create-quay-ingress-cert
 
 
 .PHONY: transfer-quay-cert
-transfer-quay-cert: ## Sync Let's Encrypt cert for quay.kubesoar.com to local repo, transfer to laptop-server, and restart containers.
+transfer-quay-cert: ## Sync Let's Encrypt cert for quay.kubesoar.com to local repo, transfer to desktop-server, and restart containers.
 	@echo "📤 Syncing Let's Encrypt certificate to local repo..."
-	sudo cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/fullchain.pem certs/quay/quay.crt
-	sudo cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/privkey.pem certs/quay/quay.key
-	sudo chown $$(id -u):$$(id -g) certs/quay/quay.crt certs/quay/quay.key
-	@echo "📤 Transferring certificate to laptop-server and restarting Quay containers..."
+	@mkdir -p certs/quay
+	@LOCAL_PW=$$(grep local_become_password ansible/group_vars/all.yml | awk '{print $$2}') && \
+	echo "$$LOCAL_PW" | sudo -S cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/fullchain.pem certs/quay/quay.crt && \
+	echo "$$LOCAL_PW" | sudo -S cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/privkey.pem certs/quay/quay.key && \
+	echo "$$LOCAL_PW" | sudo -S chown $$(id -u):$$(id -g) certs/quay/quay.crt certs/quay/quay.key
+	@echo "📤 Transferring certificate to desktop-server and restarting Quay containers..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml transfer-quay-cert.yml && \
 	popd > /dev/null
@@ -742,8 +789,8 @@ transfer-quay-cert: ## Sync Let's Encrypt cert for quay.kubesoar.com to local re
 
 
 .PHONY: create-quay-postgres
-create-quay-postgres: ## Create PostgreSQL container for Quay on laptop-server.
-	@echo "🐘 Creating PostgreSQL container for Quay on laptop-server..."
+create-quay-postgres: ## Create PostgreSQL container for Quay on desktop-server.
+	@echo "🐘 Creating PostgreSQL container for Quay on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-postgres.yml && \
 	popd > /dev/null
@@ -751,8 +798,8 @@ create-quay-postgres: ## Create PostgreSQL container for Quay on laptop-server.
 
 
 .PHONY: create-quay-valkey
-create-quay-valkey: ## Create Valkey cache container for Quay on laptop-server.
-	@echo "🔴 Creating Valkey container for Quay on laptop-server..."
+create-quay-valkey: ## Create Valkey cache container for Quay on desktop-server.
+	@echo "🔴 Creating Valkey container for Quay on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-valkey.yml && \
 	popd > /dev/null
@@ -760,8 +807,8 @@ create-quay-valkey: ## Create Valkey cache container for Quay on laptop-server.
 
 
 .PHONY: create-quay-clair
-create-quay-clair: ## Create Clair image security scanner container for Quay on laptop-server.
-	@echo "🔍 Creating Clair image scanner container on laptop-server..."
+create-quay-clair: ## Create Clair image security scanner container for Quay on desktop-server.
+	@echo "🔍 Creating Clair image scanner container on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-clair.yml && \
 	popd > /dev/null
@@ -769,8 +816,8 @@ create-quay-clair: ## Create Clair image security scanner container for Quay on 
 
 
 .PHONY: create-quay-registry
-create-quay-registry: ## Create Quay registry container on laptop-server.
-	@echo "📦 Creating Quay registry container on laptop-server..."
+create-quay-registry: ## Create Quay registry container on desktop-server.
+	@echo "📦 Creating Quay registry container on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-registry.yml && \
 	popd > /dev/null
@@ -778,8 +825,8 @@ create-quay-registry: ## Create Quay registry container on laptop-server.
 
 
 .PHONY: create-quay-nginx
-create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress container on laptop-server.
-	@echo "🌐 Creating Quay Nginx ingress container on laptop-server..."
+create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress container on desktop-server.
+	@echo "🌐 Creating Quay Nginx ingress container on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-nginx.yml && \
 	popd > /dev/null
@@ -787,17 +834,17 @@ create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress contain
 
 
 .PHONY: create-quay-stack
-create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Clair, Registry, Nginx) on laptop-server.
-	@echo "🚀 Deploying full Quay stack on laptop-server..."
+create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Clair, Registry, Nginx) on desktop-server.
+	@echo "🚀 Deploying full Quay stack on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-stack.yml && \
 	popd > /dev/null
-	@echo "✅ Full Quay stack deployed on laptop-server"
+	@echo "✅ Full Quay stack deployed on desktop-server"
 
 
 .PHONY: destroy-quay-stack
-destroy-quay-stack: ## Destroy Quay stack containers and network on laptop-server.
-	@echo "💥 Destroying Quay stack on laptop-server..."
+destroy-quay-stack: ## Destroy Quay stack containers and network on desktop-server.
+	@echo "💥 Destroying Quay stack on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml destroy-quay-stack.yml && \
 	popd > /dev/null
@@ -805,8 +852,8 @@ destroy-quay-stack: ## Destroy Quay stack containers and network on laptop-serve
 
 
 .PHONY: update-quay-config
-update-quay-config: ## Update Quay config.yaml (e.g. superusers) on laptop-server and reload.
-	@echo "⚙️ Updating Quay configuration on laptop-server..."
+update-quay-config: ## Update Quay config.yaml (e.g. superusers) on desktop-server and reload.
+	@echo "⚙️ Updating Quay configuration on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml update-quay-config.yml && \
 	popd > /dev/null
@@ -814,14 +861,14 @@ update-quay-config: ## Update Quay config.yaml (e.g. superusers) on laptop-serve
 
 
 .PHONY: quay-logs
-quay-logs: ## View Quay registry container logs on laptop-server.
+quay-logs: ## View Quay registry container logs on desktop-server.
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml check-quay-logs.yml && \
 	popd > /dev/null
 
 
 .PHONY: clair-logs
-clair-logs: ## View Clair container logs on laptop-server.
+clair-logs: ## View Clair container logs on desktop-server.
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml check-clair-logs.yml && \
 	popd > /dev/null
@@ -829,15 +876,25 @@ clair-logs: ## View Clair container logs on laptop-server.
 
 .PHONY: verify-quay
 verify-quay: ## Verify Quay stack health, containers, endpoints, and connectivity.
-	@echo "🔍 Verifying Quay stack on laptop-server..."
+	@echo "🔍 Verifying Quay stack on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml verify-quay-stack.yml && \
 	popd > /dev/null
 	@echo "✅ Verification complete"
 
 
+.PHONY: configure-quay-cache
+configure-quay-cache: ## Configure Quay.io and Docker Hub pull-through proxy caches in Quay on desktop-server.
+	@echo "🪞 Configuring Quay.io and Docker Hub pull-through caches..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml configure-quay-cache.yml && \
+	popd > /dev/null
+	@echo "✅ Pull-through proxy caches configured"
+
+
+
 .PHONY: setup-quay-entraid
-setup-quay-entraid: ## Configure Microsoft Entra ID (Azure AD) OAuth/OIDC for Quay registry on laptop-server.
+setup-quay-entraid: ## Configure Microsoft Entra ID (Azure AD) OAuth/OIDC for Quay registry on desktop-server.
 	@echo "🔐 Setting up Entra ID OAuth for Quay registry..."
 	@pushd ansible > /dev/null && \
 	TENANT=$${AZURE_TENANT_ID:-$$(az account show --query tenantId -o tsv 2>/dev/null)}; \

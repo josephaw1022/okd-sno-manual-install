@@ -204,9 +204,9 @@
       no_log: true
 
 
-# Play 2: Update Quay configuration on laptop-server and restart
+# Play 2: Update Quay configuration on desktop-server and restart
 - name: Apply Entra ID OIDC Configuration to Quay Registry
-  hosts: laptop_libvirt_hosts
+  hosts: libvirt_hosts
   become: true
   gather_facts: false
   vars:

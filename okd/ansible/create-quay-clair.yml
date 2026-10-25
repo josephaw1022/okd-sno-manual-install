@@ -1,9 +1,9 @@
 ---
-# Ansible playbook to create Clair security scanner container for Quay on laptop-server
+# Ansible playbook to create Clair security scanner container for Quay on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-clair.yml
 
 - name: Create Clair container for Quay image vulnerability scanning
-  hosts: laptop_libvirt_hosts
+  hosts: libvirt_hosts
   gather_facts: false
   vars:
     clair_container_name: quay-clair
@@ -18,7 +18,7 @@
     pg_port: 5432
     lb_gateway: 192.168.1.1
     lb_subnet: 192.168.1.0/24
-    macvlan_network_name: quay-net
+    macvlan_network_name: okd-lb-net
     dns_server: 192.168.1.5
     default_clair_psk_base64: "azhzX2hvbWVsYWJfcXVheV9jbGFpcl9wc2tfc2VjcmV0X2tleV8xMjM0NTY3ODkwYWJjZGVm"
     clair_psk_base64: "{{ lookup('env', 'CLAIR_PSK_BASE64') | default(default_clair_psk_base64, true) }}"
@@ -28,13 +28,13 @@
     - name: Find LAN interface for 192.168.1.x
       ansible.builtin.shell:
         cmd: |
-          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+          ip -o -4 addr show | awk '/192\.168\.1\./ && $2 !~ /^macvlan/ {sub(/@.*/, "", $2); print $2; exit}'
       register: lan_interface
       changed_when: false
 
     - name: Set macvlan parent interface
       ansible.builtin.set_fact:
-        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+        macvlan_interface: "{{ lan_interface.stdout | default('eno1', true) }}"
 
     - name: Check if macvlan network exists
       ansible.builtin.command:

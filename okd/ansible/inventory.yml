@@ -6,6 +6,7 @@ all:
   hosts:
     localhost:
       ansible_connection: local
+      ansible_become_password: "{{ local_become_password }}"
   children:
     libvirt_hosts:
       vars:

@@ -1,9 +1,9 @@
 ---
-# Ansible playbook to destroy Quay stack containers and network on laptop-server
+# Ansible playbook to destroy Quay stack containers and network on desktop-server
 # Usage: ansible-playbook -i inventory.yml destroy-quay-stack.yml
 
-- name: Destroy Quay stack on laptop-server
-  hosts: laptop_libvirt_hosts
+- name: Destroy Quay stack on desktop-server
+  hosts: libvirt_hosts
   gather_facts: false
   vars:
     delete_volumes: "{{ lookup('env', 'DELETE_VOLUMES') | default('false', true) | bool }}"

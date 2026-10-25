@@ -1,0 +1,205 @@
+---
+# Ansible playbook to configure Quay.io and Docker Hub pull-through proxy caches in Quay
+# Usage: ansible-playbook -i inventory.yml configure-quay-cache.yml
+
+- name: Configure Quay and Docker Hub Upstream Pull-Through Caches
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    quay_container_name: quay-registry
+    quay_admin_user: "{{ quay_username | default('admin', true) }}"
+    quay_admin_password: "{{ quay_password }}"
+    dockerhub_user: "{{ dockerhub_username | default('josephaw1022', true) }}"
+    dockerhub_token: "{{ dockerhub_pat }}"
+    quay_cache_org: "quay-cache"
+    quay_upstream: "quay.io"
+    dockerhub_cache_org: "dockerhub-cache"
+    dockerhub_upstream: "docker.io"
+    cache_expiration_s: 86400
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - quay_admin_user | length > 0
+          - quay_admin_password | length > 0
+          - dockerhub_user | length > 0
+          - dockerhub_token | length > 0
+        fail_msg: "Required credentials (quay_username, quay_password, dockerhub_username, dockerhub_pat) must be configured in group_vars/all.yml."
+
+    - name: Check that quay-registry container is running
+      ansible.builtin.command:
+        cmd: "sudo podman inspect --format '{% raw %}{{.State.Running}}{% endraw %}' {{ quay_container_name }}"
+      register: quay_running
+      changed_when: false
+      failed_when: quay_running.stdout != 'true'
+
+    - name: Configure Quay organizations and proxy cache upstreams via internal data model
+      ansible.builtin.shell:
+        cmd: |
+          sudo podman exec -i -e QUAY_CACHE_PAYLOAD_B64="$QUAY_CACHE_PAYLOAD_B64" {{ quay_container_name }} python3 - <<'EOF'
+          import base64
+          import json
+          import os
+          import sys
+          import traceback
+          from app import app
+          from data.model.user import get_user, change_password
+          from data.model.organization import get_organization, create_organization, InvalidOrganizationException
+          from data.model.proxy_cache import (
+              get_proxy_cache_config_for_org,
+              create_proxy_cache_config,
+              delete_proxy_cache_config,
+              InvalidProxyCacheConfigException,
+          )
+
+          try:
+              raw_payload = os.environ.get("QUAY_CACHE_PAYLOAD_B64", "")
+              payload = json.loads(base64.b64decode(raw_payload).decode("utf-8"))
+              admin_user = payload["quay_admin_user"]
+              admin_pass = payload["quay_admin_password"]
+              docker_user = payload["dockerhub_user"]
+              docker_pass = payload["dockerhub_token"]
+              quay_org_name = payload["quay_cache_org"]
+              quay_upstream = payload["quay_upstream"]
+              docker_org_name = payload["dockerhub_cache_org"]
+              docker_upstream = payload["dockerhub_upstream"]
+              expiration = int(payload.get("cache_expiration_s", 86400))
+
+              admin = get_user(admin_user)
+              if not admin:
+                  raise Exception(f"Quay admin user '{admin_user}' not found in database")
+
+              try:
+                  change_password(admin, admin_pass)
+              except Exception:
+                  pass
+
+              result = {
+                  "admin_user": admin_user,
+                  "caches": []
+              }
+
+              # 1. Quay.io pull-through cache
+              try:
+                  org = get_organization(quay_org_name)
+              except InvalidOrganizationException:
+                  org = create_organization(quay_org_name, f"{quay_org_name}@kubesoar.com", admin, email_required=False)
+
+              try:
+                  get_proxy_cache_config_for_org(quay_org_name)
+                  delete_proxy_cache_config(quay_org_name)
+              except InvalidProxyCacheConfigException:
+                  pass
+
+              create_proxy_cache_config(
+                  org_name=quay_org_name,
+                  upstream_registry=quay_upstream,
+                  upstream_registry_username=None,
+                  upstream_registry_password=None,
+                  expiration_s=expiration,
+              )
+              result["caches"].append({
+                  "org": quay_org_name,
+                  "upstream": quay_upstream,
+                  "auth": "anonymous",
+                  "status": "configured"
+              })
+
+              # 2. Docker Hub pull-through cache
+              try:
+                  org = get_organization(docker_org_name)
+              except InvalidOrganizationException:
+                  org = create_organization(docker_org_name, f"{docker_org_name}@kubesoar.com", admin, email_required=False)
+
+              try:
+                  get_proxy_cache_config_for_org(docker_org_name)
+                  delete_proxy_cache_config(docker_org_name)
+              except InvalidProxyCacheConfigException:
+                  pass
+
+              create_proxy_cache_config(
+                  org_name=docker_org_name,
+                  upstream_registry=docker_upstream,
+                  upstream_registry_username=docker_user,
+                  upstream_registry_password=docker_pass,
+                  expiration_s=expiration,
+              )
+              result["caches"].append({
+                  "org": docker_org_name,
+                  "upstream": docker_upstream,
+                  "auth": f"authenticated ({docker_user})",
+                  "status": "configured"
+              })
+
+              print(json.dumps(result))
+          except Exception as exc:
+              traceback.print_exc(file=sys.stderr)
+              sys.exit(1)
+          EOF
+      environment:
+        QUAY_CACHE_PAYLOAD_B64: "{{ {'quay_admin_user': quay_admin_user, 'quay_admin_password': quay_admin_password, 'dockerhub_user': dockerhub_user, 'dockerhub_token': dockerhub_token, 'quay_cache_org': quay_cache_org, 'quay_upstream': quay_upstream, 'dockerhub_cache_org': dockerhub_cache_org, 'dockerhub_upstream': dockerhub_upstream, 'cache_expiration_s': cache_expiration_s} | to_json | b64encode }}"
+      register: cache_config_result
+      no_log: true
+      changed_when: true
+
+    - name: Verify configured proxy caches in Quay data model
+      ansible.builtin.shell:
+        cmd: |
+          sudo podman exec -i {{ quay_container_name }} python3 - <<'EOF'
+          import json
+          from app import app
+          from data.model.proxy_cache import get_proxy_cache_config_for_org, InvalidProxyCacheConfigException
+
+          configs = []
+          for org in ["quay-cache", "dockerhub-cache"]:
+              try:
+                  cfg = get_proxy_cache_config_for_org(org)
+                  u_name = "None"
+                  if cfg.upstream_registry_username:
+                      try:
+                          u_name = str(cfg.upstream_registry_username.decrypt())
+                      except Exception:
+                          u_name = str(cfg.upstream_registry_username)
+                  configs.append({
+                      "org": org,
+                      "upstream_registry": str(cfg.upstream_registry),
+                      "has_credentials": bool(cfg.upstream_registry_username),
+                      "username": u_name,
+                      "expiration_s": int(cfg.expiration_s),
+                      "insecure": bool(cfg.insecure),
+                  })
+              except InvalidProxyCacheConfigException:
+                  configs.append({"org": org, "error": "Not configured"})
+
+          print(json.dumps(configs))
+          EOF
+      register: verify_caches_raw
+      changed_when: false
+
+    - name: Parse verification results
+      ansible.builtin.set_fact:
+        active_caches: "{{ verify_caches_raw.stdout | from_json }}"
+
+    - name: Display Proxy Cache configuration report
+      ansible.builtin.debug:
+        msg:
+          - "========================================================"
+          - "         QUAY PULL-THROUGH CACHE CONFIGURATION          "
+          - "========================================================"
+          - "Registry URL : https://quay.kubesoar.com"
+          - "Quay Admin   : {{ quay_admin_user }}"
+          - ""
+          - "Configured Caches:"
+          - "  1. Quay.io Proxy Cache:"
+          - "     - Organization : {{ active_caches[0].org }}"
+          - "     - Upstream     : {{ active_caches[0].upstream_registry }}"
+          - "     - Auth Mode    : {{ 'Authenticated' if active_caches[0].has_credentials else 'Anonymous / Public' }}"
+          - "     - Pull URL     : quay.kubesoar.com/{{ active_caches[0].org }}/<namespace>/<image>:<tag>"
+          - ""
+          - "  2. Docker Hub Proxy Cache:"
+          - "     - Organization : {{ active_caches[1].org }}"
+          - "     - Upstream     : {{ active_caches[1].upstream_registry }}"
+          - "     - Auth Mode    : Authenticated as {{ active_caches[1].username }}"
+          - "     - Pull URL     : quay.kubesoar.com/{{ active_caches[1].org }}/<namespace>/<image>:<tag>"
+          - "========================================================"

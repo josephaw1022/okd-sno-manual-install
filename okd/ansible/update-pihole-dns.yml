@@ -4,12 +4,14 @@
 
 - name: Update Pi-hole DNS configuration for OKD
   hosts: pihole
+  become: true
   gather_facts: false
   vars:
     pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
     pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
     ansible_user: "{{ pihole_ssh_username }}"
     ansible_password: "{{ pihole_ssh_password }}"
+    ansible_become_password: "{{ pihole_ssh_password }}"
     cluster_name: okd
     base_domain: kubesoar.com
     dnsmasq_config_file: "{{ cluster_name }}.conf"
@@ -29,6 +31,48 @@
         mode: "0644"
       notify: Restart pihole-FTL
 
+    - name: Copy Homelab wildcard dnsmasq config to Pi-hole
+      ansible.builtin.copy:
+        src: ../dnsmasq/homelab.conf
+        dest: "{{ dnsmasq_conf_dir }}/homelab.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart pihole-FTL
+
+    - name: Copy Quay dnsmasq config to Pi-hole
+      ansible.builtin.copy:
+        src: ../dnsmasq/quay.conf
+        dest: "{{ dnsmasq_conf_dir }}/quay.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart pihole-FTL
+
+    - name: Set Pi-hole listeningMode to ALL via pihole-FTL config command
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.listeningMode ALL
+      register: pihole_cfg_cmd
+      changed_when: false
+      notify: Restart pihole-FTL
+
+    - name: Set Pi-hole etc_dnsmasq_d to true via pihole-FTL config command
+      ansible.builtin.command:
+        cmd: pihole-FTL --config misc.etc_dnsmasq_d true
+      register: pihole_dnsmasq_cmd
+      changed_when: false
+      notify: Restart pihole-FTL
+
+    - name: Set Pi-hole upstream DNS servers via pihole-FTL config command
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.upstreams '[ "1.1.1.1", "1.0.0.1" ]'
+      register: pihole_upstreams_cmd
+      changed_when: false
+      notify: Restart pihole-FTL
+
+    - name: Flush handlers to restart pihole-FTL immediately if changed
+      ansible.builtin.meta: flush_handlers
+
     - name: Verify pihole-FTL config
       ansible.builtin.command:
         cmd: pihole-FTL --test
@@ -39,12 +83,15 @@
       ansible.builtin.debug:
         msg:
           - "DNS configuration updated successfully!"
-          - "Config file: {{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}"
+          - "Config files: {{ dnsmasq_conf_dir }}/{{ dnsmasq_config_file }}, homelab.conf, quay.conf"
           - ""
           - "DNS records configured:"
           - "  api.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }} (load balancer)"
           - "  api-int.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }} (load balancer)"
           - "  *.apps.{{ cluster_name }}.{{ base_domain }} -> {{ lb_ip }} (load balancer)"
+          - "  *.homelab.{{ base_domain }} -> 192.168.1.230 (MetalLB)"
+          - "  quay.{{ base_domain }} -> 192.168.1.33 (Quay stack)"
+          - "  desktop-server.{{ base_domain }} -> 192.168.1.9 (desktop-server host)"
           - "  master-0.{{ cluster_name }}.{{ base_domain }} -> {{ master_ips[0] }}"
           - "  master-1.{{ cluster_name }}.{{ base_domain }} -> {{ master_ips[1] }}"
           - "  master-2.{{ cluster_name }}.{{ base_domain }} -> {{ master_ips[2] }}"

@@ -1,6 +1,9 @@
 ---
-# Master playbook to deploy full Quay registry stack on laptop-server
+# Master playbook to deploy full Quay registry stack on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-stack.yml
+
+- name: Configure Macvlan Shim and Podman Network on desktop-server
+  ansible.builtin.import_playbook: configure-macvlan-shim-desktop.yml
 
 - name: Deploy Quay PostgreSQL Container
   ansible.builtin.import_playbook: create-quay-postgres.yml

@@ -3,7 +3,7 @@
 # Usage: ansible-playbook -i inventory.yml verify-quay-stack.yml
 
 - name: Verify Quay stack health and connectivity
-  hosts: laptop_libvirt_hosts
+  hosts: libvirt_hosts
   gather_facts: false
   vars:
     containers:

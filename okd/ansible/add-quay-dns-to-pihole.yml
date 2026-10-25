@@ -10,6 +10,7 @@
     pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
     ansible_user: "{{ pihole_ssh_username }}"
     ansible_password: "{{ pihole_ssh_password }}"
+    ansible_become_password: "{{ pihole_ssh_password }}"
     dnsmasq_config_file: "quay.conf"
     quay_records:
       - name: "quay-postgres.kubesoar.com"

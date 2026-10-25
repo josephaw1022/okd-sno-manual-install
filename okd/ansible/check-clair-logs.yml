@@ -1,6 +1,6 @@
 ---
-- name: Check Clair scanner logs on laptop-server
-  hosts: laptop_libvirt_hosts
+- name: Check Clair scanner logs on desktop-server
+  hosts: libvirt_hosts
   gather_facts: false
   tasks:
     - name: Get Clair logs

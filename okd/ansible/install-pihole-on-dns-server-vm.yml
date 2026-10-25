@@ -6,6 +6,11 @@
   hosts: pihole
   gather_facts: false
   vars:
+    pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
+    pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
+    ansible_user: "{{ pihole_ssh_username }}"
+    ansible_password: "{{ pihole_ssh_password }}"
+    ansible_become_password: "{{ pihole_ssh_password }}"
     pihole_admin_password: "{{ lookup('env', 'PIHOLE_WEBPASSWORD') | default(pihole_web_password, true) | default('changeme', true) }}"
     pihole_upstream_dns_1: 1.1.1.1
     pihole_upstream_dns_2: 1.0.0.1
@@ -101,13 +106,22 @@
         cmd: "pihole setpassword {{ pihole_admin_password }}"
       no_log: true
 
+    - name: Ensure Pi-hole permits all origins (listeningMode = ALL)
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.listeningMode ALL
+      changed_when: false
+
     - name: Ensure Pi-hole loads /etc/dnsmasq.d custom snippets
-      ansible.builtin.lineinfile:
-        path: /etc/pihole/pihole.toml
-        regexp: '^\s*etc_dnsmasq_d\s*='
-        line: "  etc_dnsmasq_d = true"
-        create: false
-      register: pihole_etc_dnsmasq_d
+      ansible.builtin.command:
+        cmd: pihole-FTL --config misc.etc_dnsmasq_d true
+      changed_when: false
+
+    - name: Ensure Pi-hole upstream DNS servers are configured
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.upstreams '[ "{{ pihole_upstream_dns_1 }}", "{{ pihole_upstream_dns_2 }}" ]'
+      changed_when: false
+
+
 
     - name: Rebuild Pi-hole gravity database
       ansible.builtin.command:

@@ -1,9 +1,9 @@
 ---
-# Ansible playbook to create Nginx Ingress container for Quay on laptop-server
+# Ansible playbook to create Nginx Ingress container for Quay on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-nginx.yml
 
 - name: Create Nginx Ingress container for Quay
-  hosts: laptop_libvirt_hosts
+  hosts: libvirt_hosts
   gather_facts: false
   vars:
     nginx_container_name: quay-nginx
@@ -11,20 +11,20 @@
     nginx_config_dir: /opt/quay-nginx
     lb_gateway: 192.168.1.1
     lb_subnet: 192.168.1.0/24
-    macvlan_network_name: quay-net
+    macvlan_network_name: okd-lb-net
     dns_server: 192.168.1.5
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
       ansible.builtin.shell:
         cmd: |
-          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+          ip -o -4 addr show | awk '/192\.168\.1\./ && $2 !~ /^macvlan/ {sub(/@.*/, "", $2); print $2; exit}'
       register: lan_interface
       changed_when: false
 
     - name: Set macvlan parent interface
       ansible.builtin.set_fact:
-        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+        macvlan_interface: "{{ lan_interface.stdout | default('eno1', true) }}"
 
     - name: Check if macvlan network exists
       ansible.builtin.command:
@@ -44,7 +44,7 @@
           {{ macvlan_network_name }}
       when: network_exists.rc != 0
 
-    - name: Ensure Nginx directories exist on laptop-server
+    - name: Ensure Nginx directories exist on desktop-server
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -77,14 +77,14 @@
       no_log: true
       when: le_cert_stat.stat.exists
 
-    - name: Copy Let's Encrypt TLS certificate to laptop-server
+    - name: Copy Let's Encrypt TLS certificate to desktop-server
       ansible.builtin.copy:
         content: "{{ le_cert_content.content | b64decode }}"
         dest: "{{ nginx_config_dir }}/certs/quay.crt"
         mode: '0644'
       when: le_cert_stat.stat.exists
 
-    - name: Copy Let's Encrypt TLS private key to laptop-server
+    - name: Copy Let's Encrypt TLS private key to desktop-server
       ansible.builtin.copy:
         content: "{{ le_key_content.content | b64decode }}"
         dest: "{{ nginx_config_dir }}/certs/quay.key"
@@ -92,14 +92,14 @@
       no_log: true
       when: le_cert_stat.stat.exists
 
-    - name: Fallback copy local TLS certificate to laptop-server
+    - name: Fallback copy local TLS certificate to desktop-server
       ansible.builtin.copy:
         src: ../certs/quay/quay.crt
         dest: "{{ nginx_config_dir }}/certs/quay.crt"
         mode: '0644'
       when: not le_cert_stat.stat.exists
 
-    - name: Fallback copy local TLS private key to laptop-server
+    - name: Fallback copy local TLS private key to desktop-server
       ansible.builtin.copy:
         src: ../certs/quay/quay.key
         dest: "{{ nginx_config_dir }}/certs/quay.key"

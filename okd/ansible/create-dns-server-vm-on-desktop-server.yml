@@ -1,0 +1,268 @@
+---
+# Ansible playbook to create a DNS server VM on desktop-server libvirt host
+# Usage: ansible-playbook -i inventory.yml create-dns-server-vm-on-desktop-server.yml
+
+- name: Create DNS server VM on desktop-server
+  hosts: libvirt_hosts
+  gather_facts: false
+  vars:
+    dns_vm_name: "{{ laptop_vm_name | default('pihole') }}"
+    dns_vm_hostname: "{{ laptop_vm_hostname | default('pihole.kubesoar.com') }}"
+    dns_vm_vcpus: "{{ laptop_vm_vcpus | default(2) }}"
+    dns_vm_memory_mb: "{{ laptop_vm_memory_mb | default(4096) }}"
+    dns_vm_disk_size_gb: "{{ laptop_vm_disk_size_gb | default(32) }}"
+    dns_vm_fedora_release: "{{ laptop_vm_fedora_release | default(44) }}"
+    dns_vm_cloud_image_name: "{{ laptop_vm_cloud_image_name | default('Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2') }}"
+    dns_vm_cloud_image_url: "https://download.fedoraproject.org/pub/fedora/linux/releases/{{ dns_vm_fedora_release }}/Cloud/x86_64/images/{{ dns_vm_cloud_image_name }}"
+    dns_vm_ip: "{{ laptop_vm_ip | default('192.168.1.5') }}"
+    dns_vm_prefix: "{{ laptop_vm_prefix | default(24) }}"
+    dns_vm_gateway: "{{ laptop_vm_gateway | default('192.168.1.1') }}"
+    dns_vm_dns: "{{ laptop_vm_dns | default('1.1.1.1') }}"
+    dns_vm_mac_address: "{{ laptop_vm_mac_address | default('52:54:00:00:00:06') }}"
+    dns_vm_storage_pool: "{{ laptop_vm_storage_pool | default('default') }}"
+    dns_vm_ssh_public_key: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    lan_cidr_match: "192.168.1."
+    dns_vm_lan_interface: ""
+
+  tasks:
+    - name: Check if DNS resolution works on desktop-server while Pi-hole is down
+      ansible.builtin.command:
+        cmd: getent hosts download.fedoraproject.org
+      register: host_dns_check
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure fallback upstream DNS resolvers in /etc/resolv.conf on desktop-server if DNS fails
+      ansible.builtin.shell:
+        cmd: |
+          if ! grep -q '^nameserver 1\.1\.1\.1' /etc/resolv.conf; then
+            printf "nameserver 1.1.1.1\nnameserver 1.0.0.1\n" >> /etc/resolv.conf
+          fi
+      when: host_dns_check.rc != 0
+
+    - name: Ensure libvirt is running
+      ansible.builtin.service:
+        name: libvirtd
+        state: started
+        enabled: true
+
+    - name: Ensure cloud image tooling is installed
+      ansible.builtin.package:
+        name:
+          - qemu-img
+          - virt-install
+        state: present
+
+    - name: Find LAN interface for 192.168.1.x (excluding macvlan)
+      ansible.builtin.shell:
+        cmd: |
+          ip -o -4 addr show | awk '/{{ lan_cidr_match | replace(".", "\\.") }}/ && $2 !~ /^macvlan/ {sub(/@.*/, "", $2); print $2; exit}'
+      register: lan_interface
+      changed_when: false
+
+    - name: Find default route interface fallback
+      ansible.builtin.shell:
+        cmd: |
+          ip route show default | awk '{print $5; exit}'
+      register: default_interface
+      changed_when: false
+
+    - name: Pick LAN interface for bridged networking
+      ansible.builtin.set_fact:
+        selected_lan_interface: >-
+          {{
+            dns_vm_lan_interface
+            if dns_vm_lan_interface | length > 0
+            else (
+              lan_interface.stdout
+              if lan_interface.stdout | length > 0
+              else default_interface.stdout
+            )
+          }}
+
+    - name: Fail when no LAN interface can be determined
+      ansible.builtin.fail:
+        msg: >-
+          Could not determine a LAN interface.
+          Set dns_vm_lan_interface explicitly when running the playbook.
+      when: selected_lan_interface | length == 0
+
+    - name: Get storage pool path
+      ansible.builtin.shell:
+        cmd: |
+          path=$(virsh pool-dumpxml "{{ dns_vm_storage_pool }}" 2>/dev/null | awk -F'[<>]' '/<path>/{print $3; exit}')
+          if [ -z "$path" ]; then
+            path=$(virsh pool-dumpxml default 2>/dev/null | awk -F'[<>]' '/<path>/{print $3; exit}')
+          fi
+          if [ -z "$path" ]; then
+            path=$(virsh pool-dumpxml System 2>/dev/null | awk -F'[<>]' '/<path>/{print $3; exit}')
+          fi
+          if [ -z "$path" ]; then
+            path="{{ iso_dest_path | default('/var/lib/libvirt/images') }}"
+          fi
+          echo "$path"
+      register: storage_pool_path
+      changed_when: false
+
+    - name: Fail when storage pool path is not detected
+      ansible.builtin.fail:
+        msg: >-
+          Could not resolve path for libvirt storage pool '{{ dns_vm_storage_pool }}'.
+          Verify the pool exists (`virsh pool-list --all`).
+      when: storage_pool_path.stdout | trim == ""
+
+    - name: Ensure VM image directory exists
+      ansible.builtin.file:
+        path: "{{ storage_pool_path.stdout | trim }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check whether VM already exists
+      ansible.builtin.command:
+        cmd: "virsh dominfo {{ dns_vm_name }}"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Check whether Fedora cloud image already exists on desktop-server
+      ansible.builtin.stat:
+        path: "{{ storage_pool_path.stdout | trim }}/{{ dns_vm_cloud_image_name }}"
+      register: cloud_image_stat
+      when: vm_exists.rc != 0
+
+    - name: Download Fedora cloud image
+      ansible.builtin.get_url:
+        url: "{{ dns_vm_cloud_image_url }}"
+        dest: "{{ storage_pool_path.stdout | trim }}/{{ dns_vm_cloud_image_name }}"
+        mode: "0644"
+      when:
+        - vm_exists.rc != 0
+        - not cloud_image_stat.stat.exists
+
+    - name: Create VM disk image from Fedora cloud image
+      ansible.builtin.command:
+        cmd: >
+          cp --reflink=auto
+          {{ storage_pool_path.stdout | trim }}/{{ dns_vm_cloud_image_name }}
+          {{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}.qcow2
+      args:
+        creates: "{{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}.qcow2"
+      when: vm_exists.rc != 0
+
+    - name: Resize VM disk image
+      ansible.builtin.command:
+        cmd: "qemu-img resize {{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}.qcow2 {{ dns_vm_disk_size_gb }}G"
+      when: vm_exists.rc != 0
+
+    - name: Write cloud-init user-data
+      ansible.builtin.copy:
+        dest: "{{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-user-data"
+        mode: "0644"
+        content: |
+          #cloud-config
+          hostname: {{ dns_vm_hostname }}
+          fqdn: {{ dns_vm_hostname }}
+          preserve_hostname: false
+          disable_root: true
+          ssh_pwauth: true
+          users:
+            - default
+          password: "{{ pihole_vm_password }}"
+          ssh_authorized_keys:
+            - {{ dns_vm_ssh_public_key }}
+          chpasswd:
+            list: |
+              {{ pihole_vm_username }}:{{ pihole_vm_password }}
+            expire: false
+          runcmd:
+            - [ sh, -c, "echo '{{ pihole_vm_username }}:{{ pihole_vm_password }}' | chpasswd" ]
+            - [ sh, -c, "passwd -u {{ pihole_vm_username }} || true" ]
+            - [ sh, -c, "id {{ pihole_vm_username }} >/dev/null 2>&1 || useradd -m -G wheel -s /bin/bash {{ pihole_vm_username }}" ]
+            - [ sh, -c, "echo '{{ pihole_vm_username }} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-{{ pihole_vm_username }}-nopasswd" ]
+            - [ sh, -c, "chmod 0440 /etc/sudoers.d/90-{{ pihole_vm_username }}-nopasswd" ]
+            - [ sh, -c, "sed -ri 's/^#?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config" ]
+            - [ sh, -c, "grep -q '^KbdInteractiveAuthentication' /etc/ssh/sshd_config && sed -ri 's/^#?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config || echo 'KbdInteractiveAuthentication yes' >> /etc/ssh/sshd_config" ]
+            - [ sh, -c, "systemctl restart sshd" ]
+      when: vm_exists.rc != 0
+
+    - name: Write cloud-init meta-data
+      ansible.builtin.copy:
+        dest: "{{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-meta-data"
+        mode: "0644"
+        content: |
+          instance-id: {{ dns_vm_name }}
+          local-hostname: {{ dns_vm_hostname }}
+      when: vm_exists.rc != 0
+
+    - name: Write cloud-init network-config
+      ansible.builtin.copy:
+        dest: "{{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-network-config"
+        mode: "0644"
+        content: |
+          version: 2
+          ethernets:
+            lan0:
+              match:
+                macaddress: "{{ dns_vm_mac_address | lower }}"
+              set-name: lan0
+              dhcp4: false
+              addresses:
+                - {{ dns_vm_ip }}/{{ dns_vm_prefix }}
+              gateway4: {{ dns_vm_gateway }}
+              nameservers:
+                addresses:
+                  - 1.1.1.1
+                  - {{ dns_vm_dns }}
+      when: vm_exists.rc != 0
+
+    - name: Create and start VM from cloud image
+      ansible.builtin.shell:
+        cmd: |
+          virt-install \
+            --name {{ dns_vm_name }} \
+            --ram {{ dns_vm_memory_mb }} \
+            --vcpus {{ dns_vm_vcpus }} \
+            --disk path={{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}.qcow2,format=qcow2,bus=virtio \
+            --network type=direct,source={{ selected_lan_interface }},source_mode=bridge,model=virtio,mac={{ dns_vm_mac_address }} \
+            --cloud-init user-data={{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-user-data,meta-data={{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-meta-data,network-config={{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-network-config \
+            --os-variant generic \
+            --import \
+            --graphics vnc,listen=0.0.0.0 \
+            --noautoconsole
+      when: vm_exists.rc != 0
+
+    - name: Ensure VM is started if it already existed
+      ansible.builtin.command:
+        cmd: "virsh start {{ dns_vm_name }}"
+      when: vm_exists.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Enable autostart for DNS server VM
+      ansible.builtin.command:
+        cmd: "virsh autostart {{ dns_vm_name }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Clear stale SSH host key for DNS VM IP on local workstation
+      ansible.builtin.command:
+        cmd: "ssh-keygen -R {{ dns_vm_ip }}"
+      delegate_to: localhost
+      become: false
+      failed_when: false
+      changed_when: false
+
+    - name: Show VM creation result
+      ansible.builtin.debug:
+        msg:
+          - "Target host: desktop-server ({{ ansible_host }})"
+          - "VM name: {{ dns_vm_name }}"
+          - "VM hostname: {{ dns_vm_hostname }}"
+          - "Storage pool: {{ dns_vm_storage_pool }} ({{ storage_pool_path.stdout | trim }})"
+          - "Disk image: {{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}.qcow2"
+          - "Cloud image: {{ storage_pool_path.stdout | trim }}/{{ dns_vm_cloud_image_name }}"
+          - "Cloud-init user-data: {{ storage_pool_path.stdout | trim }}/{{ dns_vm_name }}-user-data"
+          - "VM static IP: {{ dns_vm_ip }}/{{ dns_vm_prefix }}"
+          - "LAN interface: {{ selected_lan_interface }}"
+          - "SSH username: {{ pihole_vm_username }}"
+          - "{{ 'VM already exists; ensured started.' if vm_exists.rc == 0 else 'VM created and started.' }}"

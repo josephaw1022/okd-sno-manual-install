@@ -1,9 +1,9 @@
 ---
-# Ansible playbook to create Quay registry container on laptop-server
+# Ansible playbook to create Quay registry container on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-registry.yml
 
 - name: Create Quay registry container
-  hosts: laptop_libvirt_hosts
+  hosts: libvirt_hosts
   gather_facts: false
   vars:
     quay_container_name: quay-registry
@@ -16,7 +16,7 @@
     pg_database: "{{ quay_postgres_db | default('quay') }}"
     lb_gateway: 192.168.1.1
     lb_subnet: 192.168.1.0/24
-    macvlan_network_name: quay-net
+    macvlan_network_name: okd-lb-net
     dns_server: 192.168.1.5
     default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
     default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
@@ -26,13 +26,13 @@
     - name: Find LAN interface for 192.168.1.x
       ansible.builtin.shell:
         cmd: |
-          ip -o -4 addr show | awk '/192.168.1./ {print $2; exit}'
+          ip -o -4 addr show | awk '/192\.168\.1\./ && $2 !~ /^macvlan/ {sub(/@.*/, "", $2); print $2; exit}'
       register: lan_interface
       changed_when: false
 
     - name: Set macvlan parent interface
       ansible.builtin.set_fact:
-        macvlan_interface: "{{ lan_interface.stdout | default('enp0s25', true) }}"
+        macvlan_interface: "{{ lan_interface.stdout | default('eno1', true) }}"
 
     - name: Check if macvlan network exists
       ansible.builtin.command:

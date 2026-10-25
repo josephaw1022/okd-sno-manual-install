@@ -1,9 +1,9 @@
 ---
-# Ansible playbook to update Quay config.yaml on laptop-server
+# Ansible playbook to update Quay config.yaml on desktop-server
 # Usage: ansible-playbook -i inventory.yml update-quay-config.yml
 
 - name: Update Quay Configuration
-  hosts: laptop_libvirt_hosts
+  hosts: libvirt_hosts
   become: true
   vars:
     quay_config_dir: /opt/quay/config
