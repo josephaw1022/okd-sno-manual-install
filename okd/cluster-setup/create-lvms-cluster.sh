@@ -24,6 +24,9 @@ spec:
         nodeSelector:
           nodeSelectorTerms:
             - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+            - matchExpressions:
                 - key: node-role.kubernetes.io/master
                   operator: Exists
 EOF

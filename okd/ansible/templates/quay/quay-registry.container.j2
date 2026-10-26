@@ -1,0 +1,24 @@
+[Unit]
+Description=Quay Registry
+After=network-online.target quay-postgres.service quay-valkey.service
+Wants=network-online.target quay-postgres.service quay-valkey.service
+
+[Container]
+ContainerName={{ quay_container_name }}
+Image=quay.io/projectquay/quay:latest
+Network={{ macvlan_network_name }}
+IP={{ quay_ip }}
+DNS={{ dns_server }}
+Volume={{ quay_config_dir }}:/conf/stack:ro,Z
+Volume={{ quay_volume_name }}.volume:/datastorage:Z
+HealthCmd=curl -k -f https://127.0.0.1:{{ quay_port }}/health/instance || curl -f http://127.0.0.1:8080/health/instance || exit 1
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=5
+HealthStartPeriod=60s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target

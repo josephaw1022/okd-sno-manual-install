@@ -24,6 +24,14 @@
         domain: quay.kubesoar.com
 
   tasks:
+    - name: Inspect systemd service active states
+      ansible.builtin.command:
+        cmd: "systemctl is-active {{ item.name }}"
+      loop: "{{ containers }}"
+      register: service_statuses
+      changed_when: false
+      failed_when: false
+
     - name: Inspect container running states
       ansible.builtin.command:
         cmd: "sudo podman inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ item.name }}"
@@ -104,14 +112,14 @@
       ansible.builtin.debug:
         msg:
           - "========================================================"
-          - "              QUAY STACK VERIFICATION REPORT            "
+          - "        QUAY STACK QUADLET VERIFICATION REPORT          "
           - "========================================================"
-          - "Container Statuses:"
-          - "  quay-postgres : {{ container_statuses.results[0].stdout }} (Health: {{ health_statuses.results[0].stdout }})"
-          - "  quay-valkey   : {{ container_statuses.results[1].stdout }} (Health: {{ health_statuses.results[1].stdout }})"
-          - "  quay-clair    : {{ container_statuses.results[2].stdout }} (Health: {{ health_statuses.results[2].stdout }})"
-          - "  quay-registry : {{ container_statuses.results[3].stdout }} (Health: {{ health_statuses.results[3].stdout }})"
-          - "  quay-nginx    : {{ container_statuses.results[4].stdout }} (Health: {{ health_statuses.results[4].stdout }})"
+          - "Systemd Services & Containers:"
+          - "  quay-postgres : {{ service_statuses.results[0].stdout }} (Container: {{ container_statuses.results[0].stdout }}, Health: {{ health_statuses.results[0].stdout }})"
+          - "  quay-valkey   : {{ service_statuses.results[1].stdout }} (Container: {{ container_statuses.results[1].stdout }}, Health: {{ health_statuses.results[1].stdout }})"
+          - "  quay-clair    : {{ service_statuses.results[2].stdout }} (Container: {{ container_statuses.results[2].stdout }}, Health: {{ health_statuses.results[2].stdout }})"
+          - "  quay-registry : {{ service_statuses.results[3].stdout }} (Container: {{ container_statuses.results[3].stdout }}, Health: {{ health_statuses.results[3].stdout }})"
+          - "  quay-nginx    : {{ service_statuses.results[4].stdout }} (Container: {{ container_statuses.results[4].stdout }}, Health: {{ health_statuses.results[4].stdout }})"
           - ""
           - "Endpoints & Checks:"
           - "  PostgreSQL Ping       : {{ pg_test.stdout }}"

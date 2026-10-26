@@ -119,9 +119,11 @@
 
   handlers:
     - name: Restart Quay Registry
-      ansible.builtin.command:
-        cmd: sudo podman restart quay-registry
+      ansible.builtin.systemd:
+        name: quay-registry
+        state: restarted
 
     - name: Restart Quay Nginx
-      ansible.builtin.command:
-        cmd: sudo podman restart quay-nginx
+      ansible.builtin.systemd:
+        name: quay-nginx
+        state: restarted

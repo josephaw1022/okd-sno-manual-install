@@ -1,5 +1,5 @@
 ---
-# Ansible playbook to destroy Quay stack containers and network on desktop-server
+# Ansible playbook to destroy Quay stack Quadlet services, containers, and network on desktop-server
 # Usage: ansible-playbook -i inventory.yml destroy-quay-stack.yml
 
 - name: Destroy Quay stack on desktop-server
@@ -7,12 +7,27 @@
   gather_facts: false
   vars:
     delete_volumes: "{{ lookup('env', 'DELETE_VOLUMES') | default('false', true) | bool }}"
+    services:
+      - quay-nginx
+      - quay-registry
+      - quay-clair
+      - quay-valkey
+      - quay-postgres
     containers:
       - quay-nginx
       - quay-registry
       - quay-clair
       - quay-valkey
       - quay-postgres
+    quadlet_files:
+      - quay-nginx.container
+      - quay-registry.container
+      - quay-clair.container
+      - quay-valkey.container
+      - quay-postgres.container
+      - quay-storage-data.volume
+      - quay-valkey-data.volume
+      - quay-postgres-data.volume
     volumes:
       - quay-storage-data
       - quay-valkey-data
@@ -20,7 +35,25 @@
     macvlan_network_name: quay-net
 
   tasks:
-    - name: Stop and remove Quay containers
+    - name: Stop and disable Quay systemd services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ services }}"
+      failed_when: false
+
+    - name: Remove Quay Quadlet definition files
+      ansible.builtin.file:
+        path: "/etc/containers/systemd/{{ item }}"
+        state: absent
+      loop: "{{ quadlet_files }}"
+
+    - name: Reload systemd daemon to unregister Quadlet services
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Ensure any leftover containers are removed
       ansible.builtin.command:
         cmd: "sudo podman rm -f {{ item }}"
       loop: "{{ containers }}"
@@ -35,7 +68,7 @@
       failed_when: false
       changed_when: true
 
-    - name: Remove macvlan network
+    - name: Remove macvlan network if exists
       ansible.builtin.command:
         cmd: "sudo podman network rm {{ macvlan_network_name }}"
       failed_when: false
@@ -43,4 +76,4 @@
 
     - name: Display teardown confirmation
       ansible.builtin.debug:
-        msg: "Quay stack containers and network destroyed."
+        msg: "Quay stack Quadlet services, containers, and network destroyed."

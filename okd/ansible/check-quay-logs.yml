@@ -3,15 +3,49 @@
   hosts: libvirt_hosts
   gather_facts: false
   tasks:
+    - name: Get PostgreSQL logs
+      ansible.builtin.command:
+        cmd: sudo podman logs --tail 50 quay-postgres
+      register: pg_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display PostgreSQL logs
+      ansible.builtin.debug:
+        var: pg_logs.stdout_lines + pg_logs.stderr_lines
+
+    - name: Get PostgreSQL systemd status
+      ansible.builtin.command:
+        cmd: systemctl status quay-postgres --no-pager
+      register: pg_systemd
+      changed_when: false
+      failed_when: false
+
+    - name: Display PostgreSQL systemd status
+      ansible.builtin.debug:
+        var: pg_systemd.stdout_lines
+
     - name: Get Quay logs
       ansible.builtin.command:
         cmd: sudo podman logs --tail 50 quay-registry
       register: quay_logs
       changed_when: false
+      failed_when: false
 
     - name: Display Quay logs
       ansible.builtin.debug:
-        var: quay_logs.stdout_lines
+        var: quay_logs.stdout_lines + quay_logs.stderr_lines
+
+    - name: Get Quay container processes
+      ansible.builtin.command:
+        cmd: sudo podman top quay-registry
+      register: quay_top
+      changed_when: false
+      failed_when: false
+
+    - name: Display Quay container processes
+      ansible.builtin.debug:
+        var: quay_top.stdout_lines
 
     - name: Get Nginx logs
       ansible.builtin.command:

@@ -5,7 +5,7 @@ description: Use when deploying, verifying, debugging, or tearing down the Quay 
 
 # Homelab Quay Registry
 
-Podman-container Quay stack on `laptop-server` serving `quay.kubesoar.com`, plus the cluster-side configuration that consumes it.
+Podman Quadlet systemd-managed Quay stack on `desktop-server` serving `quay.kubesoar.com`, plus the cluster-side configuration that consumes it. Each container (PostgreSQL, Valkey, Clair, Quay Registry, Nginx) is defined as a declarative Podman Quadlet file in `/etc/containers/systemd/` and supervised by `systemd`.
 
 ## Instructions
 
@@ -45,5 +45,6 @@ Podman-container Quay stack on `laptop-server` serving `quay.kubesoar.com`, plus
 ## References
 
 - `okd/ansible/create-quay-*.yml`, `verify-quay-stack.yml`, `update-quay-config.yml`
+- `okd/ansible/templates/quay/*.j2` (Quadlet container and volume definitions)
 - `okd/cluster-setup/quay-cache-mirrors.yaml`
 

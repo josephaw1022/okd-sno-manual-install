@@ -1,18 +1,23 @@
 ---
-# Ansible playbook to create Nginx Ingress container for Quay on desktop-server
+# Ansible playbook to create Quay Nginx ingress Quadlet container on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-nginx.yml
 
-- name: Create Nginx Ingress container for Quay
+- name: Create Quay Nginx ingress Quadlet container
   hosts: libvirt_hosts
   gather_facts: false
   vars:
     nginx_container_name: quay-nginx
     nginx_ip: 192.168.1.33
     nginx_config_dir: /opt/quay-nginx
+    cert_domain: "quay.kubesoar.com"
+    letsencrypt_dir: "/etc/letsencrypt/live/{{ cert_domain }}"
+    quay_backend_ip: 192.168.1.32
+    quay_backend_port: 8443
     lb_gateway: 192.168.1.1
     lb_subnet: 192.168.1.0/24
     macvlan_network_name: okd-lb-net
     dns_server: 192.168.1.5
+    quadlet_dir: /etc/containers/systemd
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
@@ -44,7 +49,7 @@
           {{ macvlan_network_name }}
       when: network_exists.rc != 0
 
-    - name: Ensure Nginx directories exist on desktop-server
+    - name: Ensure Nginx configuration directories exist
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -55,59 +60,63 @@
 
     - name: Check if Let's Encrypt certificate exists locally
       ansible.builtin.stat:
-        path: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
+        path: "{{ letsencrypt_dir }}/fullchain.pem"
       delegate_to: localhost
       register: le_cert_stat
       become: true
 
     - name: Read Let's Encrypt certificate file from local laptop
       ansible.builtin.slurp:
-        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/fullchain.pem"
-      register: le_cert_content
+        src: "{{ letsencrypt_dir }}/fullchain.pem"
+      register: cert_content
       delegate_to: localhost
       become: true
       when: le_cert_stat.stat.exists
 
     - name: Read Let's Encrypt private key file from local laptop
       ansible.builtin.slurp:
-        src: "/etc/letsencrypt/live/{{ cert_domain | default('quay.kubesoar.com') }}/privkey.pem"
-      register: le_key_content
+        src: "{{ letsencrypt_dir }}/privkey.pem"
+      register: key_content
       delegate_to: localhost
       become: true
       no_log: true
       when: le_cert_stat.stat.exists
 
-    - name: Copy Let's Encrypt TLS certificate to desktop-server
+    - name: Copy Let's Encrypt TLS certificate to Nginx certs directory
       ansible.builtin.copy:
-        content: "{{ le_cert_content.content | b64decode }}"
+        content: "{{ cert_content.content | b64decode }}"
         dest: "{{ nginx_config_dir }}/certs/quay.crt"
         mode: '0644'
       when: le_cert_stat.stat.exists
+      notify: Restart Quay Nginx
 
-    - name: Copy Let's Encrypt TLS private key to desktop-server
+    - name: Copy Let's Encrypt TLS private key to Nginx certs directory
       ansible.builtin.copy:
-        content: "{{ le_key_content.content | b64decode }}"
+        content: "{{ key_content.content | b64decode }}"
         dest: "{{ nginx_config_dir }}/certs/quay.key"
         mode: '0600'
       no_log: true
       when: le_cert_stat.stat.exists
+      notify: Restart Quay Nginx
 
-    - name: Fallback copy local TLS certificate to desktop-server
+    - name: Fallback copy local TLS certificate to Nginx certs directory
       ansible.builtin.copy:
         src: ../certs/quay/quay.crt
         dest: "{{ nginx_config_dir }}/certs/quay.crt"
         mode: '0644'
       when: not le_cert_stat.stat.exists
+      notify: Restart Quay Nginx
 
-    - name: Fallback copy local TLS private key to desktop-server
+    - name: Fallback copy local TLS private key to Nginx certs directory
       ansible.builtin.copy:
         src: ../certs/quay/quay.key
         dest: "{{ nginx_config_dir }}/certs/quay.key"
         mode: '0600'
       no_log: true
       when: not le_cert_stat.stat.exists
+      notify: Restart Quay Nginx
 
-    - name: Deploy Nginx reverse proxy configuration
+    - name: Deploy Nginx reverse proxy configuration for Quay
       ansible.builtin.copy:
         dest: "{{ nginx_config_dir }}/nginx.conf"
         mode: '0644'
@@ -117,36 +126,41 @@
           }
 
           http {
-              include /etc/nginx/mime.types;
-              default_type application/octet-stream;
-              sendfile on;
-              keepalive_timeout 65;
-
-              resolver 192.168.1.5 valid=30s;
-
-              # Support unlimited upload size for docker image pushes
-              client_max_body_size 0;
-              proxy_buffering off;
-              proxy_request_buffering off;
+              # DNS resolver: Pi-hole DNS VM
+              resolver 192.168.1.5 valid=10s ipv6=off;
+              resolver_timeout 5s;
 
               upstream quay_backend {
                   server quay-registry.kubesoar.com:8443 max_fails=3 fail_timeout=10s;
+                  keepalive 32;
               }
 
-              # HTTP redirect to HTTPS
+              # Quay requires larger client body size for container layer pushes
+              client_max_body_size 0;
+              client_header_buffer_size 16k;
+              large_client_header_buffers 4 32k;
+
+              # Proxy buffer settings for large image manifests and catalog listings
+              proxy_buffers 16 64k;
+              proxy_buffer_size 128k;
+              proxy_busy_buffers_size 128k;
+
+              # Timeouts for pushing and pulling large image layers
+              proxy_read_timeout 900s;
+              proxy_connect_timeout 300s;
+              proxy_send_timeout 900s;
+
+              # Redirect HTTP to HTTPS
               server {
                   listen 80;
-                  server_name quay.kubesoar.com;
-
-                  location / {
-                      return 301 https://$host$request_uri;
-                  }
+                  server_name quay.kubesoar.com {{ nginx_ip }};
+                  return 301 https://$host$request_uri;
               }
 
-              # HTTPS Ingress
+              # HTTPS server with TLS termination
               server {
                   listen 443 ssl;
-                  server_name quay.kubesoar.com;
+                  server_name quay.kubesoar.com {{ nginx_ip }};
 
                   ssl_certificate /etc/nginx/ssl/quay.crt;
                   ssl_certificate_key /etc/nginx/ssl/quay.key;
@@ -167,46 +181,56 @@
                   }
               }
           }
+      notify: Restart Quay Nginx
 
-    - name: Check if container exists
+    - name: Ensure Quadlet systemd directory exists
+      ansible.builtin.file:
+        path: "{{ quadlet_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check if standalone unmanaged container exists
       ansible.builtin.command:
         cmd: sudo podman container exists {{ nginx_container_name }}
       register: container_exists
       changed_when: false
       failed_when: false
 
-    - name: Create and start Nginx Ingress container
+    - name: Check if systemd unit is active
       ansible.builtin.command:
-        cmd: >
-          sudo podman run -d
-          --name {{ nginx_container_name }}
-          --network {{ macvlan_network_name }}
-          --ip {{ nginx_ip }}
-          --dns {{ dns_server }}
-          --restart always
-          -v {{ nginx_config_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro,Z
-          -v {{ nginx_config_dir }}/certs:/etc/nginx/ssl:ro,Z
-          --health-cmd "nginx -t || exit 1"
-          --health-interval 30s
-          --health-timeout 5s
-          --health-retries 3
-          --health-start-period 5s
-          docker.io/nginx:alpine
-      when: container_exists.rc != 0
-
-    - name: Start container if stopped
-      ansible.builtin.command:
-        cmd: sudo podman start {{ nginx_container_name }}
-      when: container_exists.rc == 0
+        cmd: systemctl is-active {{ nginx_container_name }}
+      register: unit_active
       changed_when: false
       failed_when: false
+
+    - name: Stop and remove standalone unmanaged container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ nginx_container_name }}
+      when: container_exists.rc == 0 and unit_active.rc != 0
+
+    - name: Deploy Nginx Quadlet container file
+      ansible.builtin.template:
+        src: templates/quay/quay-nginx.container.j2
+        dest: "{{ quadlet_dir }}/{{ nginx_container_name }}.container"
+        mode: '0644'
+      notify: Restart Quay Nginx
+
+    - name: Flush handlers if config or quadlet files were updated
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start Quay Nginx systemd service
+      ansible.builtin.systemd:
+        name: "{{ nginx_container_name }}"
+        daemon_reload: true
+        enabled: true
+        state: started
 
     - name: Wait for container to be running
       ansible.builtin.command:
         cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ nginx_container_name }}
       register: container_running
       until: container_running.stdout == 'true'
-      retries: 15
+      retries: 20
       delay: 2
       changed_when: false
 
@@ -218,9 +242,17 @@
     - name: Display Nginx status
       ansible.builtin.debug:
         msg:
-          - "Quay Nginx Ingress container is ready!"
+          - "Quay Nginx Ingress Quadlet service is ready!"
+          - "Service: {{ nginx_container_name }}.service"
           - "Container: {{ nginx_container_name }}"
           - "IP Address: {{ nginx_ip }}"
           - "Domain: quay.kubesoar.com"
           - "Ports: 80 (HTTP redirect), 443 (HTTPS with TLS cert)"
-          - "Upstream: quay-registry.kubesoar.com:8080"
+          - "Upstream: quay-registry.kubesoar.com:8443"
+
+  handlers:
+    - name: Restart Quay Nginx
+      ansible.builtin.systemd:
+        name: "{{ nginx_container_name }}"
+        daemon_reload: true
+        state: restarted

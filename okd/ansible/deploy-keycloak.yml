@@ -115,8 +115,8 @@
         namespace: "{{ keycloak_namespace }}"
       register: tls_sec_info
       until: tls_sec_info.resources | length > 0
-      retries: 30
-      delay: 5
+      retries: 60
+      delay: 10
 
     - name: Sync TLS Secret to istio-ingress namespace
       when: keycloak_ingress_class == 'istio' and tls_sec_info.resources | length > 0

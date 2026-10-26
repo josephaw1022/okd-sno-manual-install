@@ -300,9 +300,10 @@
           SECRET_KEY: "{{ lookup('env', 'QUAY_SECRET_KEY') | default(default_secret_key, true) }}"
           DATABASE_SECRET_KEY: "{{ lookup('env', 'QUAY_DATABASE_SECRET_KEY') | default(default_db_secret_key, true) }}"
 
-    - name: Restart Quay Registry container to apply Entra ID configuration
-      ansible.builtin.command:
-        cmd: sudo podman restart {{ quay_container_name }}
+    - name: Restart Quay Registry service to apply Entra ID configuration
+      ansible.builtin.systemd:
+        name: "{{ quay_container_name }}"
+        state: restarted
 
     - name: Wait for Quay Registry container to report healthy
       ansible.builtin.command:

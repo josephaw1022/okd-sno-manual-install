@@ -1,0 +1,37 @@
+---
+- name: Inspect Quay PostgreSQL database activity and locks
+  hosts: libvirt_hosts
+  gather_facts: false
+  tasks:
+    - name: Query pg_stat_activity for quay database
+      ansible.builtin.command:
+        cmd: sudo podman exec quay-postgres psql -U quay -d quay -c "SELECT pid, client_addr, state, wait_event_type, wait_event, now() - query_start AS duration, query FROM pg_stat_activity;"
+      register: quay_activity
+      changed_when: false
+      failed_when: false
+
+    - name: Display quay activity
+      ansible.builtin.debug:
+        var: quay_activity.stdout_lines
+
+    - name: Query pg_locks for quay database
+      ansible.builtin.command:
+        cmd: sudo podman exec quay-postgres psql -U quay -d quay -c "SELECT locktype, relation::regclass, mode, granted, pid FROM pg_locks WHERE pid IN (SELECT pid FROM pg_stat_activity WHERE datname = 'quay');"
+      register: quay_locks
+      changed_when: false
+      failed_when: false
+
+    - name: Display quay locks
+      ansible.builtin.debug:
+        var: quay_locks.stdout_lines
+
+    - name: Count total tables in Quay database
+      ansible.builtin.command:
+        cmd: sudo podman exec quay-postgres psql -U quay -d quay -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
+      register: table_count
+      changed_when: false
+      failed_when: false
+
+    - name: Display table count
+      ansible.builtin.debug:
+        msg: "Total tables in 'quay' database: {{ table_count.stdout | trim }}"

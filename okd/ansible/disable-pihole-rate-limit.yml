@@ -1,0 +1,46 @@
+---
+# Ansible playbook to disable DNS rate-limiting in Pi-hole
+# Usage: ansible-playbook -i inventory.yml disable-pihole-rate-limit.yml
+
+- name: Disable DNS rate-limiting on Pi-hole
+  hosts: pihole
+  become: true
+  gather_facts: false
+  vars:
+    pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
+    pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
+    ansible_user: "{{ pihole_ssh_username }}"
+    ansible_password: "{{ pihole_ssh_password }}"
+    ansible_become_password: "{{ pihole_ssh_password }}"
+
+  tasks:
+    - name: Disable Pi-hole DNS rate-limiting count via pihole-FTL config
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.rateLimit.count 0
+      register: count_result
+      changed_when: false
+
+    - name: Disable Pi-hole DNS rate-limiting interval via pihole-FTL config
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.rateLimit.interval 0
+      register: interval_result
+      changed_when: false
+
+    - name: Verify rate-limiting count setting
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.rateLimit.count
+      register: current_count
+      changed_when: false
+
+    - name: Verify rate-limiting interval setting
+      ansible.builtin.command:
+        cmd: pihole-FTL --config dns.rateLimit.interval
+      register: current_interval
+      changed_when: false
+
+    - name: Display rate-limiting status
+      ansible.builtin.debug:
+        msg:
+          - "Pi-hole DNS rate-limiting disabled successfully!"
+          - "dns.rateLimit.count: {{ current_count.stdout }}"
+          - "dns.rateLimit.interval: {{ current_interval.stdout }}"

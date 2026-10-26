@@ -1,8 +1,8 @@
 ---
-# Ansible playbook to create PostgreSQL container for Quay on desktop-server
+# Ansible playbook to create PostgreSQL Quadlet container for Quay on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-postgres.yml
 
-- name: Create PostgreSQL container for Quay
+- name: Create PostgreSQL Quadlet container for Quay
   hosts: libvirt_hosts
   gather_facts: false
   vars:
@@ -18,6 +18,7 @@
     macvlan_network_name: okd-lb-net
     dns_server: 192.168.1.5
     pg_init_dir: /opt/quay-postgres/initdb.d
+    quadlet_dir: /etc/containers/systemd
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
@@ -64,60 +65,61 @@
           CREATE EXTENSION IF NOT EXISTS pg_trgm;
           CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-    - name: Check if PostgreSQL named volume exists
-      ansible.builtin.command:
-        cmd: sudo podman volume exists {{ pg_volume_name }}
-      register: volume_exists
-      changed_when: false
-      failed_when: false
+    - name: Ensure Quadlet systemd directory exists
+      ansible.builtin.file:
+        path: "{{ quadlet_dir }}"
+        state: directory
+        mode: '0755'
 
-    - name: Create PostgreSQL named volume
-      ansible.builtin.command:
-        cmd: sudo podman volume create {{ pg_volume_name }}
-      when: volume_exists.rc != 0
-
-    - name: Check if container exists
+    - name: Check if standalone unmanaged container exists
       ansible.builtin.command:
         cmd: sudo podman container exists {{ pg_container_name }}
       register: container_exists
       changed_when: false
       failed_when: false
 
-    - name: Create and start PostgreSQL container
+    - name: Check if systemd unit is active
       ansible.builtin.command:
-        cmd: >
-          sudo podman run -d
-          --name {{ pg_container_name }}
-          --network {{ macvlan_network_name }}
-          --ip {{ pg_ip }}
-          --dns {{ dns_server }}
-          --restart always
-          -e POSTGRES_DB={{ pg_database }}
-          -e POSTGRES_USER={{ pg_user }}
-          -e POSTGRES_PASSWORD={{ pg_password }}
-          -v {{ pg_volume_name }}:/var/lib/postgresql/data:Z
-          -v {{ pg_init_dir }}:/docker-entrypoint-initdb.d:ro,Z
-          --health-cmd "pg_isready -U {{ pg_user }} -d {{ pg_database }} || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-          --health-start-period 10s
-          docker.io/postgres:16-alpine
-      when: container_exists.rc != 0
-
-    - name: Start container if stopped
-      ansible.builtin.command:
-        cmd: sudo podman start {{ pg_container_name }}
-      when: container_exists.rc == 0
+        cmd: systemctl is-active {{ pg_container_name }}
+      register: unit_active
       changed_when: false
       failed_when: false
+
+    - name: Stop and remove standalone unmanaged container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ pg_container_name }}
+      when: container_exists.rc == 0 and unit_active.rc != 0
+
+    - name: Deploy PostgreSQL Quadlet volume file
+      ansible.builtin.template:
+        src: templates/quay/quay-postgres-data.volume.j2
+        dest: "{{ quadlet_dir }}/{{ pg_volume_name }}.volume"
+        mode: '0644'
+      notify: Restart Quay PostgreSQL
+
+    - name: Deploy PostgreSQL Quadlet container file
+      ansible.builtin.template:
+        src: templates/quay/quay-postgres.container.j2
+        dest: "{{ quadlet_dir }}/{{ pg_container_name }}.container"
+        mode: '0644'
+      notify: Restart Quay PostgreSQL
+
+    - name: Flush handlers if quadlet files were updated
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start Quay PostgreSQL systemd service
+      ansible.builtin.systemd:
+        name: "{{ pg_container_name }}"
+        daemon_reload: true
+        enabled: true
+        state: started
 
     - name: Wait for container to be running
       ansible.builtin.command:
         cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ pg_container_name }}
       register: container_running
       until: container_running.stdout == 'true'
-      retries: 15
+      retries: 20
       delay: 2
       changed_when: false
 
@@ -126,8 +128,8 @@
         cmd: sudo podman exec {{ pg_container_name }} pg_isready -U {{ pg_user }} -d {{ pg_database }}
       register: pg_ready
       until: pg_ready.rc == 0
-      retries: 30
-      delay: 2
+      retries: 60
+      delay: 5
       changed_when: false
 
     - name: Ensure pg_trgm extension exists in database
@@ -156,7 +158,8 @@
     - name: Display PostgreSQL status
       ansible.builtin.debug:
         msg:
-          - "Quay PostgreSQL container is ready!"
+          - "Quay PostgreSQL Quadlet service is ready!"
+          - "Service: {{ pg_container_name }}.service"
           - "Container: {{ pg_container_name }}"
           - "IP Address: {{ pg_ip }}"
           - "Domain: quay-postgres.kubesoar.com"
@@ -164,3 +167,10 @@
           - "Database: {{ pg_database }}"
           - "User: {{ pg_user }}"
           - "Volume: {{ pg_volume_name }}"
+
+  handlers:
+    - name: Restart Quay PostgreSQL
+      ansible.builtin.systemd:
+        name: "{{ pg_container_name }}"
+        daemon_reload: true
+        state: restarted

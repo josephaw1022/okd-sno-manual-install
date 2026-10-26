@@ -1,0 +1,79 @@
+---
+# Ansible playbook to grant cluster-admin role to a user in OKD/OpenShift
+# Usage: ansible-playbook -i inventory.yml grant-cluster-admin.yml -e "cluster_admin_user=josephsims1@gmail.com"
+
+- name: Grant cluster-admin Role to OpenShift User
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') + '/.kube/config', true) }}"
+  vars:
+    cluster_admin_user: "{{ lookup('env', 'CLUSTER_ADMIN_USER') | default('josephsims1@gmail.com', true) }}"
+    binding_name: "cluster-admin-{{ cluster_admin_user | regex_replace('[^a-zA-Z0-9]', '-') }}"
+
+  tasks:
+    - name: Check if connected to OpenShift
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: openshift-config
+      register: oc_check
+      failed_when: false
+
+    - name: Fail if not connected to OpenShift
+      ansible.builtin.fail:
+        msg: |
+          Not connected to OpenShift cluster.
+          Run 'oc login' first or ensure KUBECONFIG is set.
+      when: oc_check.resources is not defined or oc_check.resources | length == 0
+
+    - name: Check if OpenShift user exists
+      kubernetes.core.k8s_info:
+        api_version: user.openshift.io/v1
+        kind: User
+        name: "{{ cluster_admin_user }}"
+      register: user_info
+
+    - name: Display user status
+      ansible.builtin.debug:
+        msg: >-
+          User '{{ cluster_admin_user }}' found in cluster with UID {{ user_info.resources[0].metadata.uid }}.
+      when: user_info.resources is defined and user_info.resources | length > 0
+
+    - name: Create or update cluster-admin ClusterRoleBinding for user
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ binding_name }}"
+            labels:
+              app.kubernetes.io/managed-by: ansible
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+            - apiGroup: rbac.authorization.k8s.io
+              kind: User
+              name: "{{ cluster_admin_user }}"
+
+    - name: Verify ClusterRoleBinding
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: "{{ binding_name }}"
+      register: crb_info
+
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================================"
+          - "🎉 cluster-admin role granted successfully!"
+          - "========================================================"
+          - "User:                 {{ cluster_admin_user }}"
+          - "ClusterRoleBinding:   {{ binding_name }}"
+          - "Role:                 cluster-admin"
+          - "========================================================"

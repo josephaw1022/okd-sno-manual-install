@@ -1,0 +1,23 @@
+[Unit]
+Description=Quay Valkey Cache
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName={{ valkey_container_name }}
+Image=docker.io/valkey/valkey:8-alpine
+Network={{ macvlan_network_name }}
+IP={{ valkey_ip }}
+DNS={{ dns_server }}
+Volume={{ valkey_volume_name }}.volume:/data:Z
+HealthCmd=valkey-cli ping || exit 1
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=5s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target

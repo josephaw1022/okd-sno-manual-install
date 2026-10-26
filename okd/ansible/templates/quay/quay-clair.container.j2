@@ -1,0 +1,28 @@
+[Unit]
+Description=Quay Clair Security Scanner
+After=network-online.target quay-postgres.service
+Wants=network-online.target quay-postgres.service
+
+[Container]
+ContainerName={{ clair_container_name }}
+Image={{ clair_image }}
+Network={{ macvlan_network_name }}
+IP={{ clair_ip }}
+DNS={{ dns_server }}
+Environment=CLAIR_CONF=/clair/config.yaml
+Environment=CLAIR_MODE=combo
+Environment=TMPDIR=/tmp
+Tmpfs=/tmp:rw,mode=1777,size=2G
+WorkingDir=/tmp
+Volume={{ clair_config_dir }}:/clair:ro,Z
+HealthCmd=curl -f http://127.0.0.1:{{ clair_introspection_port }}/healthz || curl -f http://127.0.0.1:{{ clair_port }}/healthz || exit 1
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=5
+HealthStartPeriod=30s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target

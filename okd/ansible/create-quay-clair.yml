@@ -1,8 +1,8 @@
 ---
-# Ansible playbook to create Clair security scanner container for Quay on desktop-server
+# Ansible playbook to create Clair security scanner Quadlet container for Quay on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-clair.yml
 
-- name: Create Clair container for Quay image vulnerability scanning
+- name: Create Clair Quadlet container for Quay image vulnerability scanning
   hosts: libvirt_hosts
   gather_facts: false
   vars:
@@ -23,6 +23,7 @@
     default_clair_psk_base64: "azhzX2hvbWVsYWJfcXVheV9jbGFpcl9wc2tfc2VjcmV0X2tleV8xMjM0NTY3ODkwYWJjZGVm"
     clair_psk_base64: "{{ lookup('env', 'CLAIR_PSK_BASE64') | default(default_clair_psk_base64, true) }}"
     clair_image: "{{ lookup('env', 'CLAIR_IMAGE') | default('quay.io/projectquay/clair:4.9.0', true) }}"
+    quadlet_dir: /etc/containers/systemd
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
@@ -112,49 +113,49 @@
               key: "{{ clair_psk_base64 }}"
               iss:
                 - "quay"
+      notify: Restart Quay Clair
 
-    - name: Remove any existing Clair container to ensure clean config apply
-      ansible.builtin.command:
-        cmd: sudo podman rm -f {{ clair_container_name }}
-      failed_when: false
-      changed_when: false
+    - name: Ensure Quadlet systemd directory exists
+      ansible.builtin.file:
+        path: "{{ quadlet_dir }}"
+        state: directory
+        mode: '0755'
 
-    - name: Check if Clair container exists
+    - name: Check if standalone unmanaged container exists
       ansible.builtin.command:
         cmd: sudo podman container exists {{ clair_container_name }}
       register: container_exists
       changed_when: false
       failed_when: false
 
-    - name: Create and start Clair security scanner container
+    - name: Check if systemd unit is active
       ansible.builtin.command:
-        cmd: >
-          sudo podman run -d
-          --name {{ clair_container_name }}
-          --network {{ macvlan_network_name }}
-          --ip {{ clair_ip }}
-          --dns {{ dns_server }}
-          --restart always
-          -e CLAIR_CONF=/clair/config.yaml
-          -e CLAIR_MODE=combo
-          -e TMPDIR=/tmp
-          --tmpfs /tmp:rw,mode=1777,size=2G
-          -w /tmp
-          -v {{ clair_config_dir }}:/clair:ro,Z
-          --health-cmd "curl -f http://127.0.0.1:{{ clair_introspection_port }}/healthz || curl -f http://127.0.0.1:{{ clair_port }}/healthz || exit 1"
-          --health-interval 30s
-          --health-timeout 10s
-          --health-retries 5
-          --health-start-period 30s
-          {{ clair_image }}
-      when: container_exists.rc != 0
-
-    - name: Start container if stopped
-      ansible.builtin.command:
-        cmd: sudo podman start {{ clair_container_name }}
-      when: container_exists.rc == 0
+        cmd: systemctl is-active {{ clair_container_name }}
+      register: unit_active
       changed_when: false
       failed_when: false
+
+    - name: Stop and remove standalone unmanaged container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ clair_container_name }}
+      when: container_exists.rc == 0 and unit_active.rc != 0
+
+    - name: Deploy Clair Quadlet container file
+      ansible.builtin.template:
+        src: templates/quay/quay-clair.container.j2
+        dest: "{{ quadlet_dir }}/{{ clair_container_name }}.container"
+        mode: '0644'
+      notify: Restart Quay Clair
+
+    - name: Flush handlers if config or quadlet files were updated
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start Quay Clair systemd service
+      ansible.builtin.systemd:
+        name: "{{ clair_container_name }}"
+        daemon_reload: true
+        enabled: true
+        state: started
 
     - name: Wait for container to be running
       ansible.builtin.command:
@@ -165,22 +166,30 @@
       delay: 2
       changed_when: false
 
-    - name: Wait for Clair to complete database migrations and report healthy
+    - name: Wait for Clair to respond to health check
       ansible.builtin.command:
-        cmd: "sudo podman exec {{ clair_container_name }} curl -s -f http://127.0.0.1:{{ clair_introspection_port }}/healthz"
+        cmd: "sudo podman exec {{ clair_container_name }} curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:{{ clair_introspection_port }}/healthz"
       register: clair_health
-      until: clair_health.rc == 0
-      retries: 40
-      delay: 5
+      until: clair_health.stdout == '200'
+      retries: 30
+      delay: 3
       changed_when: false
 
     - name: Display Clair status
       ansible.builtin.debug:
         msg:
-          - "Clair Security Scanner container is ready and healthy!"
+          - "Quay Clair Quadlet service is ready!"
+          - "Service: {{ clair_container_name }}.service"
           - "Container: {{ clair_container_name }}"
-          - "Internal IP: {{ clair_ip }}:{{ clair_port }}"
-          - "Introspection Port: {{ clair_introspection_port }}"
+          - "IP Address: {{ clair_ip }}"
           - "Domain: quay-clair.kubesoar.com:{{ clair_port }}"
-          - "Database: quay-postgres.kubesoar.com:5432/{{ pg_database }}"
-          - "Auth PSK: Configured"
+          - "Introspection: quay-clair.kubesoar.com:{{ clair_introspection_port }}"
+          - "Database: {{ pg_host }}:{{ pg_port }}/{{ pg_database }}"
+          - "Health: HTTP 200"
+
+  handlers:
+    - name: Restart Quay Clair
+      ansible.builtin.systemd:
+        name: "{{ clair_container_name }}"
+        daemon_reload: true
+        state: restarted

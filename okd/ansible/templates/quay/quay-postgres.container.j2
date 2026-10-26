@@ -1,0 +1,27 @@
+[Unit]
+Description=Quay PostgreSQL Database
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName={{ pg_container_name }}
+Image=docker.io/postgres:16-alpine
+Network={{ macvlan_network_name }}
+IP={{ pg_ip }}
+DNS={{ dns_server }}
+Volume={{ pg_volume_name }}.volume:/var/lib/postgresql/data:Z
+Volume={{ pg_init_dir }}:/docker-entrypoint-initdb.d:ro,Z
+Environment=POSTGRES_DB={{ pg_database }}
+Environment=POSTGRES_USER={{ pg_user }}
+Environment=POSTGRES_PASSWORD={{ pg_password }}
+HealthCmd=pg_isready -U {{ pg_user }} -d {{ pg_database }} || exit 1
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+HealthStartPeriod=10s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target

@@ -1,8 +1,8 @@
 ---
-# Ansible playbook to create Quay registry container on desktop-server
+# Ansible playbook to create Quay registry Quadlet container on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-registry.yml
 
-- name: Create Quay registry container
+- name: Create Quay registry Quadlet container
   hosts: libvirt_hosts
   gather_facts: false
   vars:
@@ -21,6 +21,7 @@
     default_secret_key: "k8s_homelab_quay_secret_key_fixed_for_persistency_1234567890abcdef"
     default_db_secret_key: "k8s_homelab_quay_db_secret_key_fixed_for_persistency_1234567890abcd"
     default_clair_psk_base64: "azhzX2hvbWVsYWJfcXVheV9jbGFpcl9wc2tfc2VjcmV0X2tleV8xMjM0NTY3ODkwYWJjZGVm"
+    quadlet_dir: /etc/containers/systemd
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
@@ -52,6 +53,18 @@
           {{ macvlan_network_name }}
       when: network_exists.rc != 0
 
+    - name: Ensure Quadlet systemd directory exists
+      ansible.builtin.file:
+        path: "{{ quadlet_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Quay storage Quadlet volume file
+      ansible.builtin.template:
+        src: templates/quay/quay-storage-data.volume.j2
+        dest: "{{ quadlet_dir }}/{{ quay_volume_name }}.volume"
+        mode: '0644'
+
     - name: Check if Quay storage named volume exists
       ansible.builtin.command:
         cmd: sudo podman volume exists {{ quay_volume_name }}
@@ -59,7 +72,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Create Quay storage named volume
+    - name: Create Quay storage named volume if missing
       ansible.builtin.command:
         cmd: sudo podman volume create {{ quay_volume_name }}
       when: volume_exists.rc != 0
@@ -156,6 +169,7 @@
 
           SECRET_KEY: "{{ lookup('env', 'QUAY_SECRET_KEY') | default(default_secret_key, true) }}"
           DATABASE_SECRET_KEY: "{{ lookup('env', 'QUAY_DATABASE_SECRET_KEY') | default(default_db_secret_key, true) }}"
+      notify: Restart Quay Registry
 
     - name: Check if Let's Encrypt certificate exists locally
       ansible.builtin.stat:
@@ -187,6 +201,7 @@
         dest: "{{ quay_config_dir }}/ssl.cert"
         mode: '0644'
       when: le_cert_stat.stat.exists
+      notify: Restart Quay Registry
 
     - name: Copy Let's Encrypt TLS private key to Quay config directory
       ansible.builtin.copy:
@@ -195,6 +210,7 @@
         mode: '0644'
       no_log: true
       when: le_cert_stat.stat.exists
+      notify: Restart Quay Registry
 
     - name: Fallback copy local TLS certificate to Quay config directory
       ansible.builtin.copy:
@@ -202,6 +218,7 @@
         dest: "{{ quay_config_dir }}/ssl.cert"
         mode: '0644'
       when: not le_cert_stat.stat.exists
+      notify: Restart Quay Registry
 
     - name: Fallback copy local TLS private key to Quay config directory
       ansible.builtin.copy:
@@ -210,45 +227,43 @@
         mode: '0644'
       no_log: true
       when: not le_cert_stat.stat.exists
+      notify: Restart Quay Registry
 
-    - name: Remove any existing Quay container to ensure clean config apply
-      ansible.builtin.command:
-        cmd: sudo podman rm -f {{ quay_container_name }}
-      failed_when: false
-      changed_when: false
-
-    - name: Check if container exists
+    - name: Check if standalone unmanaged container exists
       ansible.builtin.command:
         cmd: sudo podman container exists {{ quay_container_name }}
       register: container_exists
       changed_when: false
       failed_when: false
 
-    - name: Create and start Quay registry container
+    - name: Check if systemd unit is active
       ansible.builtin.command:
-        cmd: >
-          sudo podman run -d
-          --name {{ quay_container_name }}
-          --network {{ macvlan_network_name }}
-          --ip {{ quay_ip }}
-          --dns {{ dns_server }}
-          --restart always
-          -v {{ quay_config_dir }}:/conf/stack:ro,Z
-          -v {{ quay_volume_name }}:/datastorage:Z
-          --health-cmd "curl -k -f https://127.0.0.1:8443/health/instance || curl -f http://127.0.0.1:8080/health/instance || exit 1"
-          --health-interval 30s
-          --health-timeout 10s
-          --health-retries 5
-          --health-start-period 60s
-          quay.io/projectquay/quay:latest
-      when: container_exists.rc != 0
-
-    - name: Start container if stopped
-      ansible.builtin.command:
-        cmd: sudo podman start {{ quay_container_name }}
-      when: container_exists.rc == 0
+        cmd: systemctl is-active {{ quay_container_name }}
+      register: unit_active
       changed_when: false
       failed_when: false
+
+    - name: Stop and remove standalone unmanaged container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ quay_container_name }}
+      when: container_exists.rc == 0 and unit_active.rc != 0
+
+    - name: Deploy Quay registry Quadlet container file
+      ansible.builtin.template:
+        src: templates/quay/quay-registry.container.j2
+        dest: "{{ quadlet_dir }}/{{ quay_container_name }}.container"
+        mode: '0644'
+      notify: Restart Quay Registry
+
+    - name: Flush handlers if config or quadlet files were updated
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start Quay registry systemd service
+      ansible.builtin.systemd:
+        name: "{{ quay_container_name }}"
+        daemon_reload: true
+        enabled: true
+        state: started
 
     - name: Wait for container to be running
       ansible.builtin.command:
@@ -260,18 +275,19 @@
       changed_when: false
 
     - name: Wait for Quay to complete migrations and report healthy
-      ansible.builtin.command:
-        cmd: "sudo podman exec {{ quay_container_name }} curl -k -s -f https://127.0.0.1:8443/health/instance || sudo podman exec {{ quay_container_name }} curl -s -f http://127.0.0.1:8080/health/instance"
+      ansible.builtin.shell:
+        cmd: "sudo podman exec {{ quay_container_name }} curl --connect-timeout 2 --max-time 5 -k -s -f https://127.0.0.1:{{ quay_port }}/health/instance || sudo podman exec {{ quay_container_name }} curl --connect-timeout 2 --max-time 5 -s -f http://127.0.0.1:8080/health/instance"
       register: quay_health
       until: quay_health.rc == 0
-      retries: 40
+      retries: 100
       delay: 5
       changed_when: false
 
     - name: Display Quay status
       ansible.builtin.debug:
         msg:
-          - "Quay Registry container is ready and healthy!"
+          - "Quay Registry Quadlet service is ready and healthy!"
+          - "Service: {{ quay_container_name }}.service"
           - "Container: {{ quay_container_name }}"
           - "Internal IP: {{ quay_ip }}:{{ quay_port }}"
           - "Domain: quay-registry.kubesoar.com:{{ quay_port }}"
@@ -286,3 +302,10 @@
           - "  3. Set Remote Registry to upstream (e.g. 'quay.io' or 'quay.io/<namespace>')"
           - "  4. (Optional) Set credentials & tag expiration, then click Save"
           - "  5. Pull through cache: podman pull quay.kubesoar.com/<org>/<image>:<tag>"
+
+  handlers:
+    - name: Restart Quay Registry
+      ansible.builtin.systemd:
+        name: "{{ quay_container_name }}"
+        daemon_reload: true
+        state: restarted

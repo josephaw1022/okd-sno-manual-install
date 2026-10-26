@@ -83,20 +83,19 @@
             token: "{{ cloudflare_tunnel_token_effective }}"
       no_log: true
 
-    - name: Ensure cloudflared deployment exists
-      kubernetes.core.k8s:
-        state: present
-        definition:
+    - name: Build cloudflared deployment manifest
+      ansible.builtin.set_fact:
+        cloudflared_deployment_manifest: |
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: "{{ cloudflared_deployment_name }}"
-            namespace: "{{ cloudflared_namespace }}"
+            name: {{ cloudflared_deployment_name }}
+            namespace: {{ cloudflared_namespace }}
           spec:
-            replicas: "{{ cloudflared_replicas | int }}"
+            replicas: {{ cloudflared_replicas | int }}
             selector:
               matchLabels:
-                pod: "{{ cloudflared_deployment_name }}"
+                pod: {{ cloudflared_deployment_name }}
             strategy:
               rollingUpdate:
                 maxSurge: 25%
@@ -105,7 +104,7 @@
             template:
               metadata:
                 labels:
-                  pod: "{{ cloudflared_deployment_name }}"
+                  pod: {{ cloudflared_deployment_name }}
               spec:
                 securityContext:
                   sysctls:
@@ -113,7 +112,7 @@
                       value: "0 65535"
                 containers:
                   - name: cloudflared
-                    image: "{{ cloudflared_image }}"
+                    image: {{ cloudflared_image }}
                     imagePullPolicy: Always
                     command:
                       - cloudflared
@@ -128,7 +127,7 @@
                       - name: TUNNEL_TOKEN
                         valueFrom:
                           secretKeyRef:
-                            name: "{{ cloudflared_secret_name }}"
+                            name: {{ cloudflared_secret_name }}
                             key: token
                     livenessProbe:
                       httpGet:
@@ -138,20 +137,29 @@
                       periodSeconds: 10
                       failureThreshold: 1
 
-    - name: Ensure cloudflared pod disruption budget exists
+    - name: Ensure cloudflared deployment exists
       kubernetes.core.k8s:
         state: present
-        definition:
+        definition: "{{ cloudflared_deployment_manifest | from_yaml }}"
+
+    - name: Build cloudflared pdb manifest
+      ansible.builtin.set_fact:
+        cloudflared_pdb_manifest: |
           apiVersion: policy/v1
           kind: PodDisruptionBudget
           metadata:
-            name: "{{ cloudflared_pdb_name }}"
-            namespace: "{{ cloudflared_namespace }}"
+            name: {{ cloudflared_pdb_name }}
+            namespace: {{ cloudflared_namespace }}
           spec:
-            minAvailable: "{{ cloudflared_min_available | int }}"
+            minAvailable: {{ cloudflared_min_available | int }}
             selector:
               matchLabels:
-                pod: "{{ cloudflared_deployment_name }}"
+                pod: {{ cloudflared_deployment_name }}
+
+    - name: Ensure cloudflared pod disruption budget exists
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ cloudflared_pdb_manifest | from_yaml }}"
 
     - name: Wait for cloudflared pods to roll out
       ansible.builtin.command:

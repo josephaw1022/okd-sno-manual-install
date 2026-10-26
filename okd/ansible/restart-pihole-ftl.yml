@@ -1,0 +1,30 @@
+---
+# Ansible playbook to restart pihole-FTL service
+# Usage: ansible-playbook -i inventory.yml restart-pihole-ftl.yml
+
+- name: Restart pihole-FTL service on DNS server VM
+  hosts: pihole
+  become: true
+  gather_facts: false
+  vars:
+    pihole_ssh_username: "{{ lookup('env', 'PIHOLE_VM_USERNAME') | default(pihole_vm_username, true) | default('fedora', true) }}"
+    pihole_ssh_password: "{{ lookup('env', 'PIHOLE_VM_PASSWORD') | default(pihole_vm_password, true) | default('changeme', true) }}"
+    ansible_user: "{{ pihole_ssh_username }}"
+    ansible_password: "{{ pihole_ssh_password }}"
+    ansible_become_password: "{{ pihole_ssh_password }}"
+
+  tasks:
+    - name: Restart pihole-FTL service
+      ansible.builtin.systemd:
+        name: pihole-FTL
+        state: restarted
+
+    - name: Ensure pihole-FTL is active and running
+      ansible.builtin.systemd:
+        name: pihole-FTL
+        state: started
+      register: ftl_status
+
+    - name: Display status
+      ansible.builtin.debug:
+        msg: "pihole-FTL service restarted successfully (Active: {{ ftl_status.status.ActiveState }})"

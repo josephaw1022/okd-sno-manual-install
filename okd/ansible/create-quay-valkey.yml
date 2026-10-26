@@ -1,8 +1,8 @@
 ---
-# Ansible playbook to create Valkey cache container for Quay on desktop-server
+# Ansible playbook to create Valkey cache Quadlet container for Quay on desktop-server
 # Usage: ansible-playbook -i inventory.yml create-quay-valkey.yml
 
-- name: Create Valkey cache container for Quay
+- name: Create Valkey cache Quadlet container for Quay
   hosts: libvirt_hosts
   gather_facts: false
   vars:
@@ -14,6 +14,7 @@
     lb_subnet: 192.168.1.0/24
     macvlan_network_name: okd-lb-net
     dns_server: 192.168.1.5
+    quadlet_dir: /etc/containers/systemd
 
   tasks:
     - name: Find LAN interface for 192.168.1.x
@@ -45,56 +46,61 @@
           {{ macvlan_network_name }}
       when: network_exists.rc != 0
 
-    - name: Check if Valkey named volume exists
-      ansible.builtin.command:
-        cmd: sudo podman volume exists {{ valkey_volume_name }}
-      register: volume_exists
-      changed_when: false
-      failed_when: false
+    - name: Ensure Quadlet systemd directory exists
+      ansible.builtin.file:
+        path: "{{ quadlet_dir }}"
+        state: directory
+        mode: '0755'
 
-    - name: Create Valkey named volume
-      ansible.builtin.command:
-        cmd: sudo podman volume create {{ valkey_volume_name }}
-      when: volume_exists.rc != 0
-
-    - name: Check if container exists
+    - name: Check if standalone unmanaged container exists
       ansible.builtin.command:
         cmd: sudo podman container exists {{ valkey_container_name }}
       register: container_exists
       changed_when: false
       failed_when: false
 
-    - name: Create and start Valkey container
+    - name: Check if systemd unit is active
       ansible.builtin.command:
-        cmd: >
-          sudo podman run -d
-          --name {{ valkey_container_name }}
-          --network {{ macvlan_network_name }}
-          --ip {{ valkey_ip }}
-          --dns {{ dns_server }}
-          --restart always
-          -v {{ valkey_volume_name }}:/data:Z
-          --health-cmd "valkey-cli ping || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 3
-          --health-start-period 5s
-          docker.io/valkey/valkey:8-alpine
-      when: container_exists.rc != 0
-
-    - name: Start container if stopped
-      ansible.builtin.command:
-        cmd: sudo podman start {{ valkey_container_name }}
-      when: container_exists.rc == 0
+        cmd: systemctl is-active {{ valkey_container_name }}
+      register: unit_active
       changed_when: false
       failed_when: false
+
+    - name: Stop and remove standalone unmanaged container
+      ansible.builtin.command:
+        cmd: sudo podman rm -f {{ valkey_container_name }}
+      when: container_exists.rc == 0 and unit_active.rc != 0
+
+    - name: Deploy Valkey Quadlet volume file
+      ansible.builtin.template:
+        src: templates/quay/quay-valkey-data.volume.j2
+        dest: "{{ quadlet_dir }}/{{ valkey_volume_name }}.volume"
+        mode: '0644'
+      notify: Restart Quay Valkey
+
+    - name: Deploy Valkey Quadlet container file
+      ansible.builtin.template:
+        src: templates/quay/quay-valkey.container.j2
+        dest: "{{ quadlet_dir }}/{{ valkey_container_name }}.container"
+        mode: '0644'
+      notify: Restart Quay Valkey
+
+    - name: Flush handlers if quadlet files were updated
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start Quay Valkey systemd service
+      ansible.builtin.systemd:
+        name: "{{ valkey_container_name }}"
+        daemon_reload: true
+        enabled: true
+        state: started
 
     - name: Wait for container to be running
       ansible.builtin.command:
         cmd: sudo podman inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ valkey_container_name }}
       register: container_running
       until: container_running.stdout == 'true'
-      retries: 15
+      retries: 20
       delay: 2
       changed_when: false
 
@@ -110,9 +116,17 @@
     - name: Display Valkey status
       ansible.builtin.debug:
         msg:
-          - "Quay Valkey container is ready!"
+          - "Quay Valkey Quadlet service is ready!"
+          - "Service: {{ valkey_container_name }}.service"
           - "Container: {{ valkey_container_name }}"
           - "IP Address: {{ valkey_ip }}"
           - "Domain: quay-valkey.kubesoar.com"
           - "Port: {{ valkey_port }}"
           - "Volume: {{ valkey_volume_name }}"
+
+  handlers:
+    - name: Restart Quay Valkey
+      ansible.builtin.systemd:
+        name: "{{ valkey_container_name }}"
+        daemon_reload: true
+        state: restarted

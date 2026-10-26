@@ -1,7 +1,7 @@
 # Makefile for OKD 3-Node Master Cluster with Libvirt (Agent-Based Installer)
 
 # OKD values
-OKD_VERSION ?= 4.22.0-okd-scos.10
+OKD_VERSION ?= 5.0.0-okd-scos.3
 
 # Openshift values
 # OKD_VERSION ?= 4.21.10
@@ -193,6 +193,26 @@ add-quay-dns: ## Add Quay DNS records to Pi-hole and verify resolution.
 .PHONY: add-desktop-server-dns add-desktop-dns
 add-desktop-server-dns: update-dns ## Add desktop-server domain to Pi-hole and update DNS.
 add-desktop-dns: add-desktop-server-dns
+
+
+.PHONY: disable-pihole-rate-limit
+disable-pihole-rate-limit: ## Disable DNS query rate-limiting in Pi-hole to prevent cluster DNS timeouts.
+	@echo "🔓 Disabling Pi-hole DNS rate-limiting..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml disable-pihole-rate-limit.yml && \
+	popd > /dev/null
+	@echo "✅ Pi-hole rate-limiting disabled"
+
+
+.PHONY: restart-pihole-ftl restart-ftl
+restart-pihole-ftl: ## Restart pihole-FTL service on DNS server VM.
+	@echo "🔄 Restarting pihole-FTL service..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml restart-pihole-ftl.yml && \
+	popd > /dev/null
+	@echo "✅ pihole-FTL restarted"
+
+restart-ftl: restart-pihole-ftl
 
 
 .PHONY: setup-dns-server spin-up-dns
@@ -432,19 +452,29 @@ clean-known-hosts: ## Remove entries with master IPs from known_hosts.
 .PHONY: watch-bootstrap
 watch-bootstrap: ## SSH into rendezvous node (master-0) and tail logs.
 	@echo "👀 Watching bootstrap services on rendezvous node (master-0)..."
-	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER0_IP) "journalctl -b -f -u agent.service"
-
+	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER0_IP) "sudo podman logs -f next-step-runner 2>/dev/null || journalctl -b -f -u agent.service"
 
 .PHONY: watch-master-1
 watch-master-1: ## SSH into master-1 and tail logs.
 	@echo "👀 Watching logs on master-1..."
-	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER1_IP) "journalctl -b -f -u agent.service"
-
+	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER1_IP) "sudo podman logs -f next-step-runner 2>/dev/null || journalctl -b -f -u agent.service"
 
 .PHONY: watch-master-2
 watch-master-2: ## SSH into master-2 and tail logs.
 	@echo "👀 Watching logs on master-2..."
-	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER2_IP) "journalctl -b -f -u agent.service"
+	@ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER2_IP) "sudo podman logs -f next-step-runner 2>/dev/null || journalctl -b -f -u agent.service"
+
+.PHONY: check-agent-logs
+check-agent-logs: ## View recent agent / assisted-installer logs and status from all master nodes.
+	@echo "=== Node Containers Status ==="
+	@for ip in $(MASTER0_IP) $(MASTER1_IP) $(MASTER2_IP); do \
+		echo "--- Node $$ip ---"; \
+		ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$$ip \
+			"sudo podman ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'" 2>/dev/null || true; \
+	done
+	@echo "\n=== Issue / Console Status on master-0 ==="
+	@ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER0_IP) \
+		"sudo cat /run/issues/* 2>/dev/null || true" 2>/dev/null || true
 
 
 .PHONY: wait-install
@@ -481,6 +511,32 @@ kill-watch: ## Kill the tmux monitoring session.
 approve-csrs: ## Approve pending CSRs for nodes.
 	@echo "✅ Approving pending CSRs..."
 	@oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' | xargs -r oc adm certificate approve
+
+
+.PHONY: diagnose-cluster
+diagnose-cluster: ## Inspect node status, crio pods, bootkube logs, and cluster state (read-only).
+	@echo "=== 1. Checking Node Connectivity, Disks & Services ==="
+	@for ip in $(MASTER0_IP) $(MASTER1_IP) $(MASTER2_IP); do \
+		echo "--- Node $$ip ---"; \
+		ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$$ip \
+			"uptime; lsblk; echo 'Containers:'; sudo podman ps --format 'table {{.Names}}\t{{.Status}}'; systemctl is-active kubelet crio 2>/dev/null || true" 2>&1 || echo "Failed to connect to $$ip"; \
+	done
+	@echo "\n=== 2. Master-0 Bootkube / Agent Logs ==="
+	@ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null core@$(MASTER0_IP) \
+		"sudo journalctl -u bootkube.service --no-pager -n 50" 2>&1 || true
+	@echo "\n=== 3. Read-Only Kube API Check ==="
+	@if [ -f cluster/auth/kubeconfig ]; then \
+		echo "--- Nodes ---"; \
+		oc --kubeconfig=cluster/auth/kubeconfig get nodes -o wide --request-timeout=5s 2>&1 || echo "API not reachable yet"; \
+		echo "--- CSRs ---"; \
+		oc --kubeconfig=cluster/auth/kubeconfig get csr --request-timeout=5s 2>&1 || true; \
+		echo "--- Cluster Operators ---"; \
+		oc --kubeconfig=cluster/auth/kubeconfig get co --request-timeout=5s 2>&1 || true; \
+		echo "--- Non-Running Pods ---"; \
+		oc --kubeconfig=cluster/auth/kubeconfig get pods -A --request-timeout=5s 2>&1 | grep -v "Running\|Completed" | head -n 40 || true; \
+	else \
+		echo "cluster/auth/kubeconfig not found"; \
+	fi
 
 
 ##@ Remote Access & Authentication
@@ -624,6 +680,21 @@ stop-vms: ## Stop all OKD master VMs via Ansible.
 	ansible-playbook -i inventory.yml stop-vms.yml && \
 	popd > /dev/null
 	@echo "✅ OKD VMs stopped"
+
+
+.PHONY: recreate-master-0
+recreate-master-0: ## Destroy master-0, recreate it from agent ISO, attach its data disk, and enable autostart.
+	@echo "💥 Destroying master-0 VM and deleting its disk..."
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml destroy-vms.yml -e '{"vms_to_destroy": ["okd-master-0"]}' && \
+	echo "🖥️ Recreating master-0 VM..." && \
+	ansible-playbook -i inventory.yml create-vms.yml && \
+	echo "🔌 Attaching data disk to master-0..." && \
+	ansible-playbook -i inventory.yml attach-node-data-disks.yml && \
+	echo "🔁 Enabling autostart for master-0..." && \
+	ansible-playbook -i inventory.yml enable-vm-autostart.yml && \
+	popd > /dev/null
+	@echo "✅ Master-0 successfully recreated, data disk attached, and autostart enabled!"
 
 
 .PHONY: destroy-vms
@@ -774,77 +845,77 @@ create-quay-cert: create-quay-ingress-cert
 
 
 .PHONY: transfer-quay-cert
-transfer-quay-cert: ## Sync Let's Encrypt cert for quay.kubesoar.com to local repo, transfer to desktop-server, and restart containers.
+transfer-quay-cert: ## Sync Let's Encrypt cert for quay.kubesoar.com to local repo, transfer to desktop-server, and restart Quay systemd services.
 	@echo "📤 Syncing Let's Encrypt certificate to local repo..."
 	@mkdir -p certs/quay
 	@LOCAL_PW=$$(grep local_become_password ansible/group_vars/all.yml | awk '{print $$2}') && \
 	echo "$$LOCAL_PW" | sudo -S cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/fullchain.pem certs/quay/quay.crt && \
 	echo "$$LOCAL_PW" | sudo -S cp /etc/letsencrypt/live/quay.$(BASE_DOMAIN)/privkey.pem certs/quay/quay.key && \
 	echo "$$LOCAL_PW" | sudo -S chown $$(id -u):$$(id -g) certs/quay/quay.crt certs/quay/quay.key
-	@echo "📤 Transferring certificate to desktop-server and restarting Quay containers..."
+	@echo "📤 Transferring certificate to desktop-server and restarting Quay services..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml transfer-quay-cert.yml && \
 	popd > /dev/null
-	@echo "✅ Certificate transferred and containers restarted"
+	@echo "✅ Certificate transferred and services restarted"
 
 
 .PHONY: create-quay-postgres
-create-quay-postgres: ## Create PostgreSQL container for Quay on desktop-server.
-	@echo "🐘 Creating PostgreSQL container for Quay on desktop-server..."
+create-quay-postgres: ## Create PostgreSQL Quadlet container for Quay on desktop-server.
+	@echo "🐘 Creating PostgreSQL Quadlet container for Quay on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-postgres.yml && \
 	popd > /dev/null
-	@echo "✅ Quay PostgreSQL container created"
+	@echo "✅ Quay PostgreSQL Quadlet container created"
 
 
 .PHONY: create-quay-valkey
-create-quay-valkey: ## Create Valkey cache container for Quay on desktop-server.
-	@echo "🔴 Creating Valkey container for Quay on desktop-server..."
+create-quay-valkey: ## Create Valkey cache Quadlet container for Quay on desktop-server.
+	@echo "🔴 Creating Valkey Quadlet container for Quay on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-valkey.yml && \
 	popd > /dev/null
-	@echo "✅ Quay Valkey container created"
+	@echo "✅ Quay Valkey Quadlet container created"
 
 
 .PHONY: create-quay-clair
-create-quay-clair: ## Create Clair image security scanner container for Quay on desktop-server.
-	@echo "🔍 Creating Clair image scanner container on desktop-server..."
+create-quay-clair: ## Create Clair image security scanner Quadlet container for Quay on desktop-server.
+	@echo "🔍 Creating Clair image scanner Quadlet container on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-clair.yml && \
 	popd > /dev/null
-	@echo "✅ Quay Clair container created"
+	@echo "✅ Quay Clair Quadlet container created"
 
 
 .PHONY: create-quay-registry
-create-quay-registry: ## Create Quay registry container on desktop-server.
-	@echo "📦 Creating Quay registry container on desktop-server..."
+create-quay-registry: ## Create Quay registry Quadlet container on desktop-server.
+	@echo "📦 Creating Quay registry Quadlet container on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-registry.yml && \
 	popd > /dev/null
-	@echo "✅ Quay registry container created"
+	@echo "✅ Quay registry Quadlet container created"
 
 
 .PHONY: create-quay-nginx
-create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress container on desktop-server.
-	@echo "🌐 Creating Quay Nginx ingress container on desktop-server..."
+create-quay-nginx: create-quay-ingress-cert ## Create Quay Nginx ingress Quadlet container on desktop-server.
+	@echo "🌐 Creating Quay Nginx ingress Quadlet container on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-nginx.yml && \
 	popd > /dev/null
-	@echo "✅ Quay Nginx ingress container created"
+	@echo "✅ Quay Nginx ingress Quadlet container created"
 
 
 .PHONY: create-quay-stack
-create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Clair, Registry, Nginx) on desktop-server.
-	@echo "🚀 Deploying full Quay stack on desktop-server..."
+create-quay-stack: create-quay-ingress-cert add-quay-dns ## Deploy full Quay stack (DNS, Cert, Postgres, Valkey, Clair, Registry, Nginx) via Quadlets on desktop-server.
+	@echo "🚀 Deploying full Quay stack on desktop-server via Quadlets..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml create-quay-stack.yml && \
 	popd > /dev/null
-	@echo "✅ Full Quay stack deployed on desktop-server"
+	@echo "✅ Full Quay stack deployed on desktop-server via Quadlets"
 
 
 .PHONY: destroy-quay-stack
-destroy-quay-stack: ## Destroy Quay stack containers and network on desktop-server.
-	@echo "💥 Destroying Quay stack on desktop-server..."
+destroy-quay-stack: ## Destroy Quay stack Quadlet services, containers, and network on desktop-server.
+	@echo "💥 Destroying Quay stack Quadlet services on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml destroy-quay-stack.yml && \
 	popd > /dev/null
@@ -852,7 +923,7 @@ destroy-quay-stack: ## Destroy Quay stack containers and network on desktop-serv
 
 
 .PHONY: update-quay-config
-update-quay-config: ## Update Quay config.yaml (e.g. superusers) on desktop-server and reload.
+update-quay-config: ## Update Quay config.yaml (e.g. superusers) on desktop-server and reload systemd service.
 	@echo "⚙️ Updating Quay configuration on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml update-quay-config.yml && \
@@ -861,21 +932,29 @@ update-quay-config: ## Update Quay config.yaml (e.g. superusers) on desktop-serv
 
 
 .PHONY: quay-logs
-quay-logs: ## View Quay registry container logs on desktop-server.
+quay-logs: ## View Quay registry service logs on desktop-server.
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml check-quay-logs.yml && \
 	popd > /dev/null
 
 
+.PHONY: quay-db-tables check-quay-db
+quay-db-tables: check-quay-db
+check-quay-db: ## List tables and migration status in Quay PostgreSQL database on desktop-server.
+	@pushd ansible > /dev/null && \
+	ansible-playbook -i inventory.yml check-quay-db.yml && \
+	popd > /dev/null
+
+
 .PHONY: clair-logs
-clair-logs: ## View Clair container logs on desktop-server.
+clair-logs: ## View Clair scanner service logs on desktop-server.
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml check-clair-logs.yml && \
 	popd > /dev/null
 
 
 .PHONY: verify-quay
-verify-quay: ## Verify Quay stack health, containers, endpoints, and connectivity.
+verify-quay: ## Verify Quay stack Quadlet services, health, containers, endpoints, and connectivity.
 	@echo "🔍 Verifying Quay stack on desktop-server..."
 	@pushd ansible > /dev/null && \
 	ansible-playbook -i inventory.yml verify-quay-stack.yml && \
@@ -908,6 +987,78 @@ setup-quay-entraid: ## Configure Microsoft Entra ID (Azure AD) OAuth/OIDC for Qu
 		-e "azure_subscription_id=$$SUB" && \
 	popd > /dev/null
 	@echo "✅ Entra ID OAuth configured for Quay registry"
+
+
+.PHONY: podman-login-quay quay-login
+podman-login-quay: ## Log in to local Quay registry (quay.<BASE_DOMAIN>) with Podman using credentials from group_vars/all.yml.
+	@echo "🔐 Logging into local Quay registry (quay.$(BASE_DOMAIN))..."
+	@QUAY_USER=$$(grep -E '^quay_username:' ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"' | tr -d "'"); \
+	QUAY_PASS=$$(grep -E '^quay_password:' ansible/group_vars/all.yml | awk '{print $$2}' | tr -d '\"' | tr -d "'"); \
+	if [ -z "$$QUAY_USER" ] || [ -z "$$QUAY_PASS" ]; then \
+		echo "❌ Quay credentials not found in ansible/group_vars/all.yml"; \
+		exit 1; \
+	fi; \
+	echo "$$QUAY_PASS" | podman login -u "$$QUAY_USER" --password-stdin "quay.$(BASE_DOMAIN)"
+	@echo "✅ Logged into quay.$(BASE_DOMAIN)"
+
+quay-login: podman-login-quay
+
+
+.PHONY: cache-okd-scos-artifacts cache-okd-scos-images sync-okd-scos-quay-cache quay-copy-image quay-copy-images
+cache-okd-scos-artifacts: podman-login-quay ## Pull OKD SCOS release and content artifacts from quay.io and push to local Quay pull-through cache with upstream tag names.
+	@echo "🚀 Caching OKD SCOS release and content artifacts in local Quay (quay.$(BASE_DOMAIN)/quay-cache)..."
+	@RELEASE_IMG="$${OKD_RELEASE_IMAGE:-quay.io/okd/scos-release:$(OKD_VERSION)}"; \
+	if [ -z "$$OKD_RELEASE_IMAGE" ] && command -v openshift-install >/dev/null 2>&1; then \
+		INSTALLER_RELEASE=$$(openshift-install version 2>/dev/null | awk '/release image/ {print $$3}'); \
+		if [ -n "$$INSTALLER_RELEASE" ]; then \
+			RELEASE_IMG="$$INSTALLER_RELEASE"; \
+		fi; \
+	fi; \
+	echo "⬇️  Pulling release image: $$RELEASE_IMG..."; \
+	podman pull "$$RELEASE_IMG"; \
+	echo "⬆️  Pushing release image to local Quay cache..."; \
+	podman tag "$$RELEASE_IMG" "quay.$(BASE_DOMAIN)/quay-cache/okd/scos-release:$(OKD_VERSION)"; \
+	podman push "quay.$(BASE_DOMAIN)/quay-cache/okd/scos-release:$(OKD_VERSION)"; \
+	REL_DIGEST=$$(podman inspect --format '{{.Digest}}' "$$RELEASE_IMG" 2>/dev/null || true); \
+	if [ -n "$$REL_DIGEST" ]; then \
+		podman tag "$$RELEASE_IMG" "quay.$(BASE_DOMAIN)/quay-cache/okd/scos-release:$$REL_DIGEST" 2>/dev/null || true; \
+		podman push "quay.$(BASE_DOMAIN)/quay-cache/okd/scos-release:$$REL_DIGEST" 2>/dev/null || true; \
+	fi; \
+	echo "🔍 Resolving SCOS content artifacts for $$RELEASE_IMG..."; \
+	temp_list=$$(mktemp); \
+	if [ "$${ALL_IMAGES:-false}" = "true" ] && command -v oc >/dev/null 2>&1; then \
+		oc adm release info -o json "$$RELEASE_IMG" 2>/dev/null | jq -r '.references.spec.tags[] | select(.from.name | contains("scos-content")) | "\(.name) \(.from.name)"' | sort -u > "$$temp_list" || true; \
+	elif command -v oc >/dev/null 2>&1; then \
+		oc adm release info -o json "$$RELEASE_IMG" 2>/dev/null | jq -r '.references.spec.tags[] | select(.name | test("machine-os|agent-installer|stream-coreos|baremetal-installer")) | "\(.name) \(.from.name)"' | sort -u > "$$temp_list" || true; \
+	fi; \
+	if [ ! -s "$$temp_list" ]; then \
+		echo "agent-installer-api-server quay.io/okd/scos-content@sha256:ad59e329804334bb5cca7aeeb3d5b2521a2be5317fdcaed045eeb0dbf83ff1df" > "$$temp_list"; \
+		echo "agent-installer-csr-approver quay.io/okd/scos-content@sha256:3336a054f6e1da72551dfce8c532071c8fa96eb8df41f07033d0ff97356f176e" >> "$$temp_list"; \
+		echo "agent-installer-node-agent quay.io/okd/scos-content@sha256:5f24fbcfc2703f03eb4f3ffa5504549d06f54902c8e7d75ea5e130518e5d28ee" >> "$$temp_list"; \
+		echo "agent-installer-orchestrator quay.io/okd/scos-content@sha256:93b72d1e04d5e05a382cfd2cb5facf2831c5321a9d96d5cbba8465397065f84b" >> "$$temp_list"; \
+		echo "agent-installer-ui quay.io/okd/scos-content@sha256:2d25c0fe2c2498f075fb0beeaa4743c527de2693a5434fa40c755a510d30086d" >> "$$temp_list"; \
+		echo "agent-installer-utils quay.io/okd/scos-content@sha256:49fd1e5b9de5df80c0ce3792d8a042b0ac3f3aa827f0feee3636aadebbb8bd26" >> "$$temp_list"; \
+		echo "baremetal-installer quay.io/okd/scos-content@sha256:f1508cdf913df10dbd35d8e1612621c789ccc519b1138083bb1ef0b752993959" >> "$$temp_list"; \
+		echo "ironic-machine-os-downloader quay.io/okd/scos-content@sha256:8ce6b71b3bb4b95656bc2e1f7cbfd7bf944e48c777d8a834c1521c542203e3a0" >> "$$temp_list"; \
+		echo "machine-os-images quay.io/okd/scos-content@sha256:43025c581959905384b74ec967d14366101a32c65ef887a098f69554f1381579" >> "$$temp_list"; \
+		echo "stream-coreos quay.io/okd/scos-content@sha256:4a1c64c23149958810afa5274994f5a49e4ccaab6d84ac2a0e78f5d9b09ffb7f" >> "$$temp_list"; \
+		echo "stream-coreos-extensions quay.io/okd/scos-content@sha256:5557be0bfb53e27f57d62cabd644073411de03a874c5a1ccc73f432a72365332" >> "$$temp_list"; \
+	fi; \
+	while read -r comp img; do \
+		tag_name="$(OKD_VERSION)-$$comp"; \
+		echo "⬇️  Pulling SCOS content: $$img ($$tag_name)..."; \
+		podman pull "$$img"; \
+		echo "⬆️  Pushing SCOS content to quay.$(BASE_DOMAIN)/quay-cache/okd/scos-content:$$tag_name..."; \
+		podman tag "$$img" "quay.$(BASE_DOMAIN)/quay-cache/okd/scos-content:$$tag_name"; \
+		podman push "quay.$(BASE_DOMAIN)/quay-cache/okd/scos-content:$$tag_name"; \
+	done < "$$temp_list"; \
+	rm -f "$$temp_list"; \
+	echo "✅ OKD SCOS artifacts successfully pulled and cached in local Quay!"
+
+cache-okd-scos-images: cache-okd-scos-artifacts
+sync-okd-scos-quay-cache: cache-okd-scos-artifacts
+quay-copy-image: cache-okd-scos-artifacts
+quay-copy-images: cache-okd-scos-artifacts
 
 
 
@@ -1998,6 +2149,7 @@ KEYCLOAK_HOMELAB_ENTRAID_SECRET_NAME ?= keycloak-homelab-entraid-secret
 KEYCLOAK_HOMELAB_USER_GROUP ?= homelab-user
 KEYCLOAK_OKD_CLIENT_NAME ?= okd
 KEYCLOAK_OKD_IDP_NAME ?= keycloak
+CLUSTER_ADMIN_USER ?= josephsims1@gmail.com
 
 
 .PHONY: install-keycloak-operator
@@ -2177,6 +2329,18 @@ setup-okd-keycloak-oauth: ## Configure Keycloak Homelab Realm OpenID OAuth provi
 
 configure-okd-keycloak-oauth: setup-okd-keycloak-oauth
 setup-keycloak-oauth: setup-okd-keycloak-oauth
+
+
+.PHONY: grant-cluster-admin add-cluster-admin
+grant-cluster-admin: ## Grant cluster-admin role to an OpenShift user (default: CLUSTER_ADMIN_USER=josephsims1@gmail.com).
+	@echo "👑 Granting cluster-admin role to $(CLUSTER_ADMIN_USER)..."
+	@pushd ansible > /dev/null && \
+	CLUSTER_ADMIN_USER="$(CLUSTER_ADMIN_USER)" \
+	ansible-playbook -i inventory.yml grant-cluster-admin.yml && \
+	popd > /dev/null
+	@echo "✅ cluster-admin role granted to $(CLUSTER_ADMIN_USER)"
+
+add-cluster-admin: grant-cluster-admin
 
 
 .PHONY: deploy-keycloak create-keycloak
